@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { timingSafeEqual, createHash } from "crypto";
 import { getAdminBootstrapSecret } from "@/lib/config";
 import { bootstrapFirstSuperAdmin } from "@/lib/super-admin";
 import { db } from "@/lib/db";
@@ -52,7 +53,12 @@ export async function POST(req: Request) {
     }
 
     const provided = req.headers.get("x-bootstrap-secret") ?? "";
-    if (provided !== configuredSecret) {
+    // SECURITY FIX: constant-time comparison (a plain !== leaks the secret's
+    // prefix through response timing). Both sides are hashed first so the
+    // lengths match and the length itself does not leak either.
+    const digest = (v: string) => createHash("sha256").update(v).digest();
+    const secretOk = timingSafeEqual(digest(provided), digest(configuredSecret));
+    if (!secretOk) {
       await logAudit({
         req,
         action: "BOOTSTRAP_DENIED",

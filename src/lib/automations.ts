@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { hotelTimezone, sameZonedDay } from "@/lib/timezone";
 import { logAudit } from "@/lib/audit";
 import { executeCampaignSend } from "@/lib/campaigns";
 
@@ -43,14 +44,6 @@ export interface AutomationAction {
   couponId?: string;
   segmentId?: string;
   text?: string;
-}
-
-function isSameCalendarDay(a: Date, b: Date): boolean {
-  return (
-    a.getFullYear() === b.getFullYear() &&
-    a.getMonth() === b.getMonth() &&
-    a.getDate() === b.getDate()
-  );
 }
 
 /** Human label for the occurrence day (used in occurrence-scoped campaigns). */
@@ -377,6 +370,8 @@ export async function scanAutomationTriggers(
   byTrigger: Record<string, number>;
   details: { automationId: string; name: string; trigger: string; matched: number }[];
 }> {
+  // Calendar-day matching uses the hotel's timezone (lib/timezone.ts).
+  const tz = await hotelTimezone(hotelId);
   const rules = await db.automationRule.findMany({
     where: { hotelId, status: "ACTIVE" },
   });
@@ -398,7 +393,7 @@ export async function scanAutomationTriggers(
           select: { customerId: true, checkout: true },
         });
         for (const v of visits) {
-          if (v.checkout && isSameCalendarDay(v.checkout, target)) {
+          if (v.checkout && sameZonedDay(v.checkout, target, tz)) {
             matched.push({ customerId: v.customerId, triggerDate });
           }
         }
@@ -411,7 +406,7 @@ export async function scanAutomationTriggers(
           select: { customerId: true, visitDate: true },
         });
         for (const rv of rvs) {
-          if (isSameCalendarDay(rv.visitDate, target)) {
+          if (sameZonedDay(rv.visitDate, target, tz)) {
             matched.push({ customerId: rv.customerId, triggerDate });
           }
         }
@@ -542,7 +537,7 @@ export async function scanAutomationTriggers(
           if (
             c.visits.length + c.restaurantVisits.length >= 2 &&
             lastActivity &&
-            isSameCalendarDay(lastActivity, now)
+            sameZonedDay(lastActivity, now, tz)
           ) {
             matched.push({ customerId: c.id, triggerDate });
           }

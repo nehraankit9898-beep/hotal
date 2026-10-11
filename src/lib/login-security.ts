@@ -85,28 +85,30 @@ export async function recordFailedLogin(params: {
     ipAddress: params.ip,
     details: { email: params.email },
   });
-  const user = await db.user.findUnique({
+  // SECURITY FIX (lost update): the counter is incremented atomically in SQL
+  // and the NEW value is read back from the same statement's result. The old
+  // read-then-write let parallel wrong guesses all read the same value, so
+  // the 5-attempt lockout could be bypassed with concurrent requests.
+  const bumped = await db.user.update({
     where: { id: params.userId },
+    data: { failedLoginAttempts: { increment: 1 } },
     select: { failedLoginAttempts: true },
   });
-  const failures = (user?.failedLoginAttempts ?? 0) + 1;
+  const failures = bumped.failedLoginAttempts;
   const lockIndex = Math.floor(failures / MAX_FAILURES) - 1; // 0-based on each 5th
   const justLocked = failures % MAX_FAILURES === 0 && lockIndex >= 0;
   const lockedForSeconds = justLocked
     ? Math.floor(LOCK_STEPS_MS[Math.min(lockIndex, LOCK_STEPS_MS.length - 1)] / 1000)
     : undefined;
 
-  await db.user.update({
-    where: { id: params.userId },
-    data: {
-      failedLoginAttempts: failures,
-      lockedUntil: justLocked ? new Date(Date.now() + (lockedForSeconds ?? 0) * 1000) : undefined,
-    },
-  });
+  if (justLocked) {
+    await db.user.update({
+      where: { id: params.userId },
+      data: { lockedUntil: new Date(Date.now() + (lockedForSeconds ?? 0) * 1000) },
+    });
+  }
 
-  await db.authAttempt.create({
-    data: { email: params.email, success: false, ipAddress: params.ip },
-  });
+  await recordAuthAttempt({ email: params.email, success: false, ip: params.ip });
 
   await logAudit({
     hotelId: params.hotelId ?? null,
@@ -153,9 +155,37 @@ export async function recordSuccessfulLogin(params: {
       lastLoginIp: params.ip,
     },
   });
+  await recordAuthAttempt({ email: params.email, success: true, ip: params.ip });
+}
+
+/**
+ * Persist one attempt for the shared per-IP throttle. Used for BOTH known and
+ * unknown accounts: previously unknown-email failures were never counted, so
+ * an attacker could probe arbitrary addresses without touching the IP limit.
+ */
+export async function recordAuthAttempt(params: {
+  email: string;
+  success: boolean;
+  ip: string;
+}): Promise<void> {
   await db.authAttempt.create({
-    data: { email: params.email, success: true, ipAddress: params.ip },
+    data: {
+      email: params.email.toLowerCase(),
+      success: params.success,
+      ipAddress: params.ip === "unknown" ? null : params.ip,
+    },
   });
+}
+
+/**
+ * Housekeeping: AuthAttempt rows older than the throttle window are never read
+ * again. Deleting them keeps the table (and the per-login IP count) small.
+ */
+export async function purgeOldAuthAttempts(olderThanMs = 7 * 24 * 60 * 60_000): Promise<number> {
+  const res = await db.authAttempt.deleteMany({
+    where: { createdAt: { lt: new Date(Date.now() - olderThanMs) } },
+  });
+  return res.count;
 }
 
 /** Shared request-context helper. */

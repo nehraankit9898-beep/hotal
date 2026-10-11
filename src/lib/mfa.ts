@@ -119,31 +119,53 @@ export function generateTotp(secretBase32: string, at = Date.now()): string {
   return hotp(secret, counter);
 }
 
-/** Verify a 6-digit TOTP code with ±1 step drift. Constant-time per candidate. */
-export function verifyTotp(secretBase32: string, code: string, at = Date.now()): boolean {
-  if (!/^\d{6}$/.test(code)) return false;
+/**
+ * Return the RFC 6238 time-step the code matches (within ±1 drift), or null.
+ * The step is what replay protection stores (see verifyLoginCode).
+ */
+export function matchTotpStep(secretBase32: string, code: string, at = Date.now()): number | null {
+  if (!/^\d{6}$/.test(code)) return null;
   const secret = base32Decode(secretBase32);
   const counter = Math.floor(at / 1000 / PERIOD_SECONDS);
+  let matched: number | null = null;
+  // Evaluate every candidate (no early exit) so timing does not reveal the step.
   for (let drift = -DRIFT_STEPS; drift <= DRIFT_STEPS; drift++) {
     const expected = hotp(secret, counter + drift);
     const a = Buffer.from(expected);
     const b = Buffer.from(code);
-    if (a.length === b.length && timingSafeEqual(a, b)) return true;
+    if (a.length === b.length && timingSafeEqual(a, b) && matched === null) {
+      matched = counter + drift;
+    }
   }
-  return false;
+  return matched;
+}
+
+/** Verify a 6-digit TOTP code with ±1 step drift. Constant-time per candidate. */
+export function verifyTotp(secretBase32: string, code: string, at = Date.now()): boolean {
+  return matchTotpStep(secretBase32, code, at) !== null;
 }
 
 // ---------- Backup codes (single use, hashed at rest) ----------
 
+/**
+ * SECURITY FIX (backup codes): codes are stored as HMAC-SHA256 under a key derived
+ * from the server secret. Bare SHA-256 of a 48-bit code can be brute-forced
+ * offline from a database leak; the keyed hash cannot be without the secret.
+ */
 function hashBackupCode(code: string): string {
+  return createHmac("sha256", mfaKey()).update(code).digest("hex");
+}
+
+/** Legacy (pre-fix) unkeyed hash — still accepted so existing codes keep working. */
+function legacyHashBackupCode(code: string): string {
   return createHash("sha256").update(code).digest("hex");
 }
 
 function generateBackupCodes(): { plain: string[]; hashes: string[] } {
   const plain: string[] = [];
   for (let i = 0; i < BACKUP_CODE_COUNT; i++) {
-    // 10 chars from a Crockford-ish alphabet (no ambiguous chars)
-    plain.push(randomBytes(6).toString("hex").toUpperCase().replace(/[OIL]/g, "0"));
+    // 12 hex characters (48 bits) of CSPRNG output.
+    plain.push(randomBytes(6).toString("hex").toUpperCase());
   }
   return { plain, hashes: plain.map(hashBackupCode) };
 }
@@ -184,12 +206,12 @@ export async function confirmMfaSetup(
   if (!user?.mfaSecret) return { ok: false, error: "Start MFA setup first." };
   if (user.mfaEnabled) return { ok: false, error: "MFA is already enabled." };
   const secret = decryptSecret(user.mfaSecret);
-  if (!verifyTotp(secret, code))
-    return { ok: false, error: "That code is incorrect. Try the next one." };
+  const setupStep = matchTotpStep(secret, code);
+  if (setupStep === null) return { ok: false, error: "That code is incorrect. Try the next one." };
   const { plain, hashes } = generateBackupCodes();
   await db.user.update({
     where: { id: userId },
-    data: { mfaEnabled: true, mfaBackupCodes: JSON.stringify(hashes) },
+    data: { mfaEnabled: true, mfaBackupCodes: JSON.stringify(hashes), mfaLastUsedStep: setupStep },
   });
   await logAudit({
     userId,
@@ -211,13 +233,7 @@ export async function disableMfa(
     select: { mfaEnabled: true, mfaSecret: true, mfaBackupCodes: true, role: true },
   });
   if (!user?.mfaEnabled) return { ok: false, error: "MFA is not enabled." };
-  const verified = await consumeCodeForUser(
-    userId,
-    code,
-    user.mfaSecret,
-    user.mfaBackupCodes,
-    false,
-  );
+  const verified = await verifyStepUpCode(userId, code, user.mfaSecret, user.mfaBackupCodes);
   if (!verified) return { ok: false, error: "That code is incorrect." };
   await db.user.update({
     where: { id: userId },
@@ -243,13 +259,7 @@ export async function regenerateBackupCodes(
     select: { mfaEnabled: true, mfaSecret: true, mfaBackupCodes: true },
   });
   if (!user?.mfaEnabled) return { ok: false, error: "MFA is not enabled." };
-  const verified = await consumeCodeForUser(
-    userId,
-    code,
-    user.mfaSecret,
-    user.mfaBackupCodes,
-    false,
-  );
+  const verified = await verifyStepUpCode(userId, code, user.mfaSecret, user.mfaBackupCodes);
   if (!verified) return { ok: false, error: "That code is incorrect." };
   const { plain, hashes } = generateBackupCodes();
   await db.user.update({ where: { id: userId }, data: { mfaBackupCodes: JSON.stringify(hashes) } });
@@ -281,8 +291,20 @@ export async function verifyLoginCode(
     return { ok: false, error: "MFA is not enabled for this account." };
   }
   const secret = decryptSecret(user.mfaSecret);
-  if (verifyTotp(secret, code)) {
-    return { ok: true, usedBackupCode: false };
+  const step = matchTotpStep(secret, code);
+  if (step !== null) {
+    // SECURITY FIX (TOTP replay): claim this time-step atomically. A step that is
+    // not strictly greater than the last accepted one is a replay and is refused.
+    const claimed = await db.user.updateMany({
+      where: {
+        id: userId,
+        OR: [{ mfaLastUsedStep: null }, { mfaLastUsedStep: { lt: step } }],
+      },
+      data: { mfaLastUsedStep: step },
+    });
+    if (claimed.count === 1) {
+      return { ok: true, usedBackupCode: false };
+    }
   }
   const consumed = await consumeCodeForUser(
     userId,
@@ -293,6 +315,34 @@ export async function verifyLoginCode(
   );
   if (consumed) return { ok: true, usedBackupCode: true };
   return { ok: false, error: "Invalid authentication code." };
+}
+
+/**
+ * BUG FIX (step-up): disable-MFA and regenerate-backup-codes used to accept ONLY
+ * backup codes, so a user who had lost them could never turn MFA off or rotate
+ * them with their authenticator app. Accept a current authenticator code (with
+ * the same replay claim as login) or a backup code.
+ */
+async function verifyStepUpCode(
+  userId: string,
+  code: string,
+  mfaSecret: string | null,
+  backupCodesJson: string | null,
+): Promise<boolean> {
+  if (mfaSecret) {
+    const step = matchTotpStep(decryptSecret(mfaSecret), code);
+    if (step !== null) {
+      const claimed = await db.user.updateMany({
+        where: {
+          id: userId,
+          OR: [{ mfaLastUsedStep: null }, { mfaLastUsedStep: { lt: step } }],
+        },
+        data: { mfaLastUsedStep: step },
+      });
+      if (claimed.count === 1) return true;
+    }
+  }
+  return consumeCodeForUser(userId, code, mfaSecret, backupCodesJson, false);
 }
 
 /** Try to match + atomically consume a backup code. */
@@ -310,8 +360,10 @@ async function consumeCodeForUser(
   } catch {
     return false;
   }
-  const candidate = hashBackupCode(code.trim().toUpperCase());
-  const idx = hashes.indexOf(candidate);
+  const normalized = code.trim().toUpperCase();
+  const idx = hashes.findIndex(
+    (h) => h === hashBackupCode(normalized) || h === legacyHashBackupCode(normalized),
+  );
   if (idx === -1) return false;
   if (!consume) return true;
   const remaining = hashes.filter((_, i) => i !== idx);

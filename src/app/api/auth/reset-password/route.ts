@@ -1,7 +1,7 @@
 import { db } from "@/lib/db";
 import { jsonError, serverError } from "@/lib/api-helpers";
 import { consumeSecurityToken } from "@/lib/security-tokens";
-import { hashPassword, validatePasswordStrength } from "@/lib/auth";
+import { validatePasswordStrength, hashPasswordAsync } from "@/lib/auth";
 import { logAudit, AUDIT_ACTIONS } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { requestIp } from "@/lib/login-security";
@@ -56,7 +56,7 @@ export async function POST(req: Request) {
     const user = await db.user.update({
       where: { id: consumed.userId },
       data: {
-        passwordHash: hashPassword(password),
+        passwordHash: await hashPasswordAsync(password),
         // Revoke every issued session (they re-authenticate with the new password).
         tokenVersion: { increment: 1 },
         // Clear any lockout state — identity was just proven via email.

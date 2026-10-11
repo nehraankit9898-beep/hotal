@@ -360,6 +360,14 @@ export function validateExtendedEnv(): EnvValidationResult {
       "STAYLOOP_TEST / NODE_ENV=test must not be set in production — test-only behavior would be exposed.",
     );
   }
+  // - Rate limits and the OTP/login lockout counters are per-process unless Redis
+  //   is configured. Multi-instance production without REDIS_URL silently weakens
+  //   every limit by the instance count — make that visible at boot.
+  if (isProduction() && !(process.env.REDIS_URL || "").trim()) {
+    warnings.push(
+      "REDIS_URL is not set in production — rate limits are per-instance (in-process). Set REDIS_URL when running more than one app instance.",
+    );
+  }
   // - SQLite is a development database only.
   if (isProduction() && (process.env.DATABASE_URL || "").trim().startsWith("file:")) {
     errors.push(

@@ -33,10 +33,23 @@ export async function POST(req: Request, ctx: Ctx) {
       if (deniedVoid) return deniedVoid;
     }
 
-    const amountMinor =
-      typeof body.amountMinor === "number" && Number.isFinite(body.amountMinor)
-        ? Math.max(0, Math.floor(body.amountMinor))
-        : undefined;
+    // BUG FIX: a negative or zero amount used to be silently clamped to 0 and then
+    // reported as "Nothing left to refund". Invalid amounts are now rejected.
+    let amountMinor: number | undefined;
+    if (body.amountMinor !== undefined && body.amountMinor !== null) {
+      if (
+        typeof body.amountMinor !== "number" ||
+        !Number.isSafeInteger(body.amountMinor) ||
+        body.amountMinor <= 0
+      ) {
+        return jsonError(
+          "amountMinor must be a positive whole number of minor units.",
+          422,
+          "INVALID_AMOUNT",
+        );
+      }
+      amountMinor = body.amountMinor;
+    }
 
     const result = await refundOrVoidBill({
       hotelId: auth.user.hotelId,

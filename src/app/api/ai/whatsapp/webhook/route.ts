@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { decryptCredentials, isEncryptedEnvelope } from "@/lib/crypto";
 import { handleInboundWhatsApp } from "@/lib/ai/chatbot";
 import { logger } from "@/lib/logger";
+import { resolveTenantProvider } from "@/lib/tenant-providers";
 
 /**
  * Phase 18 — Meta WhatsApp inbound webhook for the ordering chatbot.
@@ -71,8 +72,24 @@ function verifyMetaSignature(rawBody: string, header: string | null, secret: str
   }
 }
 
+/**
+ * Phone-number → tenant cache. PERF FIX: every inbound message used to decrypt
+ * the credentials of EVERY tenant's WhatsApp integration. A short TTL keeps the
+ * routing correct (a removed integration stops routing within a minute).
+ */
+const TENANT_CACHE_TTL_MS = 60 * 1000;
+const tenantCache = new Map<string, { hotelId: string | null; expiresAt: number }>();
+
 /** Resolve the tenant (hotelId) that owns the receiving WhatsApp number. */
 async function resolveTenantByPhoneNumberId(phoneNumberId: string): Promise<string | null> {
+  const cached = tenantCache.get(phoneNumberId);
+  if (cached && cached.expiresAt > Date.now()) return cached.hotelId;
+  const hotelId = await lookupTenantByPhoneNumberId(phoneNumberId);
+  tenantCache.set(phoneNumberId, { hotelId, expiresAt: Date.now() + TENANT_CACHE_TTL_MS });
+  return hotelId;
+}
+
+async function lookupTenantByPhoneNumberId(phoneNumberId: string): Promise<string | null> {
   const integrations = await db.integration.findMany({
     where: { type: "WHATSAPP_CLOUD", enabled: true },
     select: { hotelId: true, credentials: true },
@@ -143,7 +160,18 @@ export async function POST(req: Request) {
           customerName: contactName,
         });
         if (result.body) {
-          replies.push({ phone: message.from, reply: result.body });
+          // BUG FIX: the reply used to be returned as JSON, which Meta ignores,
+          // so customers never received the chatbot's answer. Send it through
+          // the tenant's own WhatsApp provider (same pipeline as campaigns).
+          try {
+            const provider = await resolveTenantProvider(hotelId, "WHATSAPP");
+            const sent = await provider.send({ to: message.from, body: result.body });
+            if (!sent.ok) {
+              logger.warn("ai.whatsapp_reply_failed", { hotelId, error: sent.error ?? "unknown" });
+            }
+          } catch (err) {
+            logger.error("ai.whatsapp_reply_error", { hotelId, error: String(err) });
+          }
         }
       }
     }
@@ -151,5 +179,7 @@ export async function POST(req: Request) {
 
   // Always 200 to Meta (non-200 causes aggressive retries); processing
   // outcomes are audited inside the engine.
+  // `replies` mirrors what was sent (diagnostics). Meta ignores response bodies;
+  // the actual delivery happens above through the tenant's provider.
   return Response.json({ received: true, replies });
 }

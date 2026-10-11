@@ -175,6 +175,17 @@ export async function awardForRestaurantVisit(
 ): Promise<AwardResult> {
   const settings = await getLoyaltySettings(hotelId);
   const account = await getOrCreateAccount(hotelId, customerId);
+  // BUG FIX: the program toggle was stored and displayed but never enforced —
+  // a hotel that disabled loyalty kept earning points on every visit.
+  if (!settings.enabled) {
+    return {
+      ok: true,
+      reason: "PROGRAM_DISABLED",
+      pointsAwarded: 0,
+      balance: account.points,
+      tier: account.tier as Tier,
+    };
+  }
   const idempotencyKey = `earn:${visitId}`;
 
   return withAccountLock(account.id, async () => {
@@ -284,6 +295,16 @@ export async function redeemReward(
 ): Promise<RedeemResult> {
   const settings = await getLoyaltySettings(hotelId);
   const account = await getOrCreateAccount(hotelId, customerId);
+  // BUG FIX: honour the program toggle (see awardForRestaurantVisit).
+  if (!settings.enabled) {
+    return {
+      ok: false,
+      reason: "The loyalty program is currently turned off for this hotel.",
+      pointsRedeemed: 0,
+      rewardValue: 0,
+      balance: account.points,
+    };
+  }
 
   const result = await withAccountLock(account.id, async () => {
     try {
@@ -461,7 +482,8 @@ export async function joinLoyalty(
 ): Promise<JoinResult> {
   const settings = await getLoyaltySettings(hotelId);
   const account = await getOrCreateAccount(hotelId, customerId);
-  const bonus = Math.max(0, settings.signupBonus);
+  // No signup bonus while the program is switched off (the account is still created).
+  const bonus = settings.enabled ? Math.max(0, settings.signupBonus) : 0;
 
   const result = await withAccountLock(account.id, async () => {
     try {

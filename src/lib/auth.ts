@@ -1,4 +1,11 @@
-import { createHmac, randomBytes, scryptSync, timingSafeEqual } from "crypto";
+import {
+  createHmac,
+  randomBytes,
+  scrypt as scryptCallback,
+  scryptSync,
+  timingSafeEqual,
+  type ScryptOptions,
+} from "crypto";
 import { getAuthSecret } from "@/lib/config";
 import { isSecureRequest } from "@/lib/proxy";
 
@@ -12,23 +19,136 @@ import { isSecureRequest } from "@/lib/proxy";
 const TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
 
 // ---------- Password hashing (scrypt: memory-hard KDF) ----------
+//
+// Current format (v2):  scrypt$<N>$<r>$<p>$<saltHex>$<hashHex>
+//   N=2^17, r=8, p=1 — the OWASP-recommended scrypt baseline.
+// Legacy format (v1):   scrypt$<saltHex>$<hashHex>  (N=16384, r=8, p=1)
+//
+// SECURITY FIX: the old fixed N=16384 is below the current recommendation.
+// Legacy hashes still verify and are transparently re-hashed to v2 on the
+// next successful login (see needsRehash + the login route).
+
+const SCRYPT_N = 2 ** 17;
+const SCRYPT_R = 8;
+const SCRYPT_P = 1;
+const SCRYPT_KEYLEN = 64;
+const LEGACY_N = 16384;
+const LEGACY_R = 8;
+const LEGACY_P = 1;
+
+/** Node's default maxmem (32 MiB) is too small for N=2^17; size it explicitly. */
+function scryptOptions(N: number, r: number, p: number) {
+  return { N, r, p, maxmem: 2 * 128 * N * r };
+}
 
 export function hashPassword(password: string): string {
   const salt = randomBytes(16).toString("hex");
-  const hash = scryptSync(password, salt, 64).toString("hex");
-  return `scrypt$${salt}$${hash}`;
+  const hash = scryptSync(
+    password,
+    salt,
+    SCRYPT_KEYLEN,
+    scryptOptions(SCRYPT_N, SCRYPT_R, SCRYPT_P),
+  ).toString("hex");
+  return `scrypt$${SCRYPT_N}$${SCRYPT_R}$${SCRYPT_P}$${salt}$${hash}`;
+}
+
+/**
+ * Async scrypt: runs on the libuv thread pool instead of blocking the event loop
+ * (a v2 hash costs ~0.4 s of CPU). Request handlers should prefer these.
+ */
+function scryptAsync(
+  password: string,
+  salt: string,
+  keylen: number,
+  options: ScryptOptions,
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    scryptCallback(password, salt, keylen, options, (err, key) =>
+      err ? reject(err) : resolve(key),
+    );
+  });
+}
+
+export async function hashPasswordAsync(password: string): Promise<string> {
+  const salt = randomBytes(16).toString("hex");
+  const hash = (
+    await scryptAsync(password, salt, SCRYPT_KEYLEN, scryptOptions(SCRYPT_N, SCRYPT_R, SCRYPT_P))
+  ).toString("hex");
+  return `scrypt$${SCRYPT_N}$${SCRYPT_R}$${SCRYPT_P}$${salt}$${hash}`;
+}
+
+function parseStoredHash(
+  stored: string,
+): { N: number; r: number; p: number; salt: string; hash: string } | null {
+  const parts = stored.split("$");
+  if (parts[0] !== "scrypt") return null;
+  if (parts.length === 3) {
+    const [, salt, hash] = parts;
+    return salt && hash ? { N: LEGACY_N, r: LEGACY_R, p: LEGACY_P, salt, hash } : null;
+  }
+  if (parts.length === 6) {
+    const N = Number(parts[1]);
+    const r = Number(parts[2]);
+    const p = Number(parts[3]);
+    const [, , , , salt, hash] = parts;
+    if (!Number.isInteger(N) || N < 2 || (N & (N - 1)) !== 0 || N > 2 ** 20) return null;
+    if (!Number.isInteger(r) || r < 1 || r > 32) return null;
+    if (!Number.isInteger(p) || p < 1 || p > 8) return null;
+    return salt && hash ? { N, r, p, salt, hash } : null;
+  }
+  return null;
 }
 
 export function verifyPassword(password: string, stored: string): boolean {
   try {
-    const [scheme, salt, hash] = stored.split("$");
-    if (scheme !== "scrypt" || !salt || !hash) return false;
-    const candidate = scryptSync(password, salt, 64);
-    const expected = Buffer.from(hash, "hex");
+    const parsed = parseStoredHash(stored);
+    if (!parsed) return false;
+    const expected = Buffer.from(parsed.hash, "hex");
+    const candidate = scryptSync(
+      password,
+      parsed.salt,
+      expected.length,
+      scryptOptions(parsed.N, parsed.r, parsed.p),
+    );
     return candidate.length === expected.length && timingSafeEqual(candidate, expected);
   } catch {
     return false;
   }
+}
+
+/** Non-blocking variant of verifyPassword (same result, same parsing rules). */
+export async function verifyPasswordAsync(password: string, stored: string): Promise<boolean> {
+  try {
+    const parsed = parseStoredHash(stored);
+    if (!parsed) return false;
+    const expected = Buffer.from(parsed.hash, "hex");
+    const candidate = await scryptAsync(
+      password,
+      parsed.salt,
+      expected.length,
+      scryptOptions(parsed.N, parsed.r, parsed.p),
+    );
+    return candidate.length === expected.length && timingSafeEqual(candidate, expected);
+  } catch {
+    return false;
+  }
+}
+
+/** True when a stored hash uses legacy parameters and should be re-hashed. */
+export function needsRehash(stored: string): boolean {
+  const parsed = parseStoredHash(stored);
+  if (!parsed) return false;
+  return parsed.N !== SCRYPT_N || parsed.r !== SCRYPT_R || parsed.p !== SCRYPT_P;
+}
+
+let dummyHash: string | null = null;
+/**
+ * A real hash used to keep login timing constant when the email is unknown.
+ * Verifying against it costs the same scrypt work as a real account.
+ */
+export function dummyPasswordHash(): string {
+  if (!dummyHash) dummyHash = hashPassword(randomBytes(16).toString("hex"));
+  return dummyHash;
 }
 
 // ---------- Session token (compact JWT-like: base64url(payload).base64url(hmac)) ----------
@@ -133,6 +253,19 @@ export function clearSessionCookieOptions(req?: Request) {
 
 export type SessionSource = "cookie" | "bearer";
 
+/**
+ * SECURITY/ROBUSTNESS FIX: decodeURIComponent throws URIError on malformed
+ * percent-encoding. A bad cookie must mean "not authenticated" (401), never an
+ * unhandled 500.
+ */
+export function safeDecodeCookie(raw: string): string | null {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+}
+
 /** Extract session + HOW it was presented (cookie or bearer). */
 export function getSessionAuth(
   req: Request,
@@ -144,8 +277,8 @@ export function getSessionAuth(
       if (idx === -1) continue;
       const key = part.slice(0, idx).trim();
       if (key === SESSION_COOKIE) {
-        const value = decodeURIComponent(part.slice(idx + 1).trim());
-        const payload = verifySessionToken(value);
+        const value = safeDecodeCookie(part.slice(idx + 1).trim());
+        const payload = value ? verifySessionToken(value) : null;
         if (payload) return { session: payload, via: "cookie" };
       }
     }

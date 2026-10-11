@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { db } from "@/lib/db";
 import { requireAuth, serverError } from "@/lib/api-helpers";
 import { requirePermission } from "@/lib/permissions";
@@ -23,6 +24,9 @@ function fmtMinor(minor: number, currency: string): string {
  * GET /api/bills/[id]/receipt — print-friendly receipt (A6/80mm ready).
  * Returns HTML for window.print(); the bill snapshot is immutable.
  */
+const PRINT_SCRIPT_BODY = 'window.addEventListener("load", () => window.print());';
+const PRINT_SCRIPT_HASH = createHash("sha256").update(PRINT_SCRIPT_BODY).digest("base64");
+
 export async function GET(req: Request, ctx: Ctx) {
   try {
     const auth = await requireAuth(req);
@@ -128,11 +132,17 @@ ${payRows}
 ${bill.refundMinor > 0 ? `<tr><td>Refunded</td><td class="n">− ${fmtMinor(bill.refundMinor, bill.currency)}</td></tr>` : ""}
 </table>
 <p class="muted" style="text-align:center">Thank you for dining with us!</p>
-<script>window.addEventListener("load", () => window.print());</script>
+<script>${PRINT_SCRIPT_BODY}</script>
 </body></html>`;
 
+    // CSP for this standalone document: only the one print script (by hash) runs.
+    // Replaces the old blanket 'unsafe-inline' that the global CSP used to grant.
     return new Response(html, {
-      headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": `default-src 'none'; script-src 'sha256-${PRINT_SCRIPT_HASH}'; style-src 'unsafe-inline'; frame-ancestors 'none'`,
+      },
     });
   } catch (err) {
     return serverError(err);

@@ -2,7 +2,7 @@ import { randomBytes } from "crypto";
 import { db } from "@/lib/db";
 import { requireAuth, jsonError, readJson, serverError } from "@/lib/api-helpers";
 import { requirePermission } from "@/lib/permissions";
-import { hashPassword } from "@/lib/auth";
+import { hashPasswordAsync } from "@/lib/auth";
 import { issueActivationToken } from "@/lib/super-admin";
 import { logAudit, AUDIT_ACTIONS } from "@/lib/audit";
 import { withHotelWriteLock } from "@/lib/saas/limits";
@@ -102,7 +102,13 @@ export async function POST(req: Request) {
 
     const existing = await db.user.findUnique({ where: { email } });
     if (existing) {
-      return jsonError("An account with this email already exists.", 409, "EMAIL_EXISTS");
+      // Generic on purpose: an admin of one hotel must not learn whether an
+      // address is registered at another tenant.
+      return jsonError(
+        "We couldn't create this account. Check the details and try again.",
+        409,
+        "EMAIL_UNAVAILABLE",
+      );
     }
 
     // Staff plan limit (Phase 13 §5) — enforced ATOMICALLY (D16): the seat
@@ -129,7 +135,7 @@ export async function POST(req: Request) {
           email,
           // Random unusable password — the invitee sets their own via the
           // one-time invitation link. No default credentials ever exist.
-          passwordHash: hashPassword(randomBytes(32).toString("hex")),
+          passwordHash: await hashPasswordAsync(randomBytes(32).toString("hex")),
           role,
           status: "PENDING",
           mustChangePassword: false, // activation flow sets the FIRST password

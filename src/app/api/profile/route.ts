@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { hashPassword, verifyPassword } from "@/lib/auth";
+import { hashPasswordAsync, verifyPasswordAsync } from "@/lib/auth";
 import { requireAuth, jsonError, readJson, serverError } from "@/lib/api-helpers";
 import { parseWith, profileUpdateSchema } from "@/lib/validation";
 import { logAudit, AUDIT_ACTIONS } from "@/lib/audit";
@@ -34,10 +34,13 @@ export async function PATCH(req: Request) {
     if (newPassword !== undefined) {
       // When the flag forces a change, the "current password" may be the
       // temporary bootstrap/invitation secret — it must still be verified.
-      if (currentPassword === undefined || !verifyPassword(currentPassword, dbUser.passwordHash)) {
+      if (
+        currentPassword === undefined ||
+        !(await verifyPasswordAsync(currentPassword, dbUser.passwordHash))
+      ) {
         return jsonError("Your current password is incorrect.", 403, "WRONG_PASSWORD");
       }
-      data.passwordHash = hashPassword(newPassword);
+      data.passwordHash = await hashPasswordAsync(newPassword);
       data.mustChangePassword = false;
       data.tokenVersion = { increment: 1 }; // revoke all other sessions
       passwordChanged = true;
