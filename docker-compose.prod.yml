@@ -1,0 +1,193 @@
+# StayLoop — production stack (spec §45).
+#
+#   cp .env.production.example .env   # fill EVERY value first (no defaults!)
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+#   First super admin (one-shot, requires ADMIN_BOOTSTRAP_SECRET in .env):
+#     docker compose -f docker-compose.prod.yml --profile admin run --rm admin \
+#       --name "Platform Admin" --email you@example.com
+#   → prints a temporary password ONCE. REMOVE ADMIN_BOOTSTRAP_SECRET from
+#     .env afterwards and `docker compose up -d` again.
+#
+# AUDIT FIX (deploy-4): the admin service previously used the required
+# interpolation ${ADMIN_BOOTSTRAP_SECRET:?…}. Compose interpolates the WHOLE
+# file before profile filtering, so after the documented “remove the secret
+# from .env” step EVERY compose command (up/ps/logs) failed with
+# “required variable ADMIN_BOOTSTRAP_SECRET is missing a value”. The variable
+# is now optional here (empty default) — the bootstrap SCRIPT itself refuses
+# to run without it (fail-closed), which keeps the one-shot semantics without
+# breaking the inactive-profile service.
+#
+# Secrets are injected from the .env file (never baked into images).
+# Service order is enforced by healthchecks:
+#   1. postgres + redis become healthy
+#   2. migrate applies prisma migrations (one-shot, must exit 0)
+#   3. web + worker start; caddy terminates TLS for the public domain
+#
+# AUDIT FIX 1C: DATABASE_PASSWORD is now part of the environment contract
+# (the postgres service requires it; the app uses DATABASE_URL — both must
+# reference the SAME password, URL-ENCODED in DATABASE_URL).
+
+name: stayloop
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-stayloop}
+      POSTGRES_USER: ${POSTGRES_USER:-stayloop}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?set DATABASE_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stayloop} -d ${POSTGRES_DB:-stayloop}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # NOT exposed to the host (internal network only) — audit fix 6.
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # NOT exposed to the host (internal network only) — audit fix 6.
+
+  # One-shot migration runner — applies pending migrations BEFORE web/worker
+  # start. `prisma migrate deploy` is non-destructive by design.
+  migrate:
+    build:
+      context: .
+      target: migrate
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  web:
+    build:
+      context: .
+      target: web
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      # Shared storage (explicitly initialized ownership in the image: UID 1001)
+      EXPORT_DIR: /app/var/exports
+      BACKUP_DIR: /app/var/backups
+    # Audit fix 6: bound to the loopback interface ONLY — the app port 3000
+    # cannot be reached directly from the internet; all public traffic must
+    # pass through the caddy proxy (TLS + forwarded headers).
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    volumes:
+      - exports:/app/var/exports
+      - backups:/app/var/backups
+    healthcheck:
+      # READINESS (dependencies checked) — orchestrators should withdraw
+      # traffic on failure. Liveness is /api/health/live (Dockerfile).
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Background worker — same non-root identity (UID 1001) as web, shared
+  # exports volume, ships pg_dump (PostgreSQL 16 client) for backups.
+  worker:
+    build:
+      context: .
+      target: worker
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      EXPORT_DIR: /app/var/exports
+      BACKUP_DIR: /app/var/backups
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    volumes:
+      - exports:/app/var/exports
+      - backups:/app/var/backups
+
+  # One-shot first-super-admin bootstrap (audit fix 1B).
+  # Requires the `admin` profile AND operator-supplied --name/--email:
+  #   docker compose -f docker-compose.prod.yml --profile admin run --rm admin \
+  #     --name "Platform Admin" --email you@example.com
+  # The image ENTRYPOINT is `bun scripts/bootstrap-admin.ts`, so the run
+  # arguments are appended to it (see Dockerfile, audit fix deploy-3).
+  # The temporary password is printed ONCE on stdout (operator-only), the
+  # account is mustChangePassword, and MFA enrolment is enforced afterwards.
+  # Remove ADMIN_BOOTSTRAP_SECRET from .env once done — the script then
+  # refuses to run (fail-closed) while the rest of the stack keeps working.
+  admin:
+    profiles: ["admin"]
+    build:
+      context: .
+      target: admin-bootstrap
+    environment:
+      NODE_ENV: production
+      # Optional interpolation (NOT :? — see AUDIT FIX deploy-4 above): an
+      # empty value disables the bootstrap inside the script itself.
+      ADMIN_BOOTSTRAP_SECRET: ${ADMIN_BOOTSTRAP_SECRET:-}
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  # Public reverse proxy — TLS (ACME) + security headers + the ONLY public
+  # entry point. Audit fix 6: the old Caddyfile listened on :81 and allowed
+  # an XTransformPort query parameter to proxy to ARBITRARY localhost ports
+  # (SSRF-ish proxy bypass). Removed entirely; this config serves the
+  # configured domain with automatic HTTPS and forwards to web:3000 only.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      # Domain + ACME email come from .env (no secrets — public values).
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:2019/metrics || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  pgdata:
+  redisdata:
+  exports:
+  backups:
+  caddydata:
+  caddyconfig:

@@ -1,0 +1,3261 @@
+// StayLoop — Hotel Customer Retention SaaS — PRODUCTION schema (PostgreSQL)
+// Mirrors prisma/schema.prisma (dev SQLite) model-for-model.
+// Deploy with: DATABASE_URL=postgres://... prisma db push (or prisma migrate deploy)
+// Production startup FAILS if DATABASE_URL is not postgres (see src/lib/db.ts).
+
+// NOTE (bug-report item 9): both generators share ONE output path —
+// generating this client OVERWRITES the other client ("last generate wins").
+// After generating the PostgreSQL client, always re-run
+//   bunx prisma generate --schema prisma/schema.prisma
+// before running the dev/test harness (it expects the SQLite client).
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =====================
+// RBAC — Phase 6 expanded roles
+// =====================
+enum UserRole {
+  SUPER_ADMIN // platform-wide administrator (Phase 6)
+  HOTEL_OWNER // full access to own hotel (Phase 6)
+  HOTEL_ADMIN // hotel admin (Phase 1+2)
+  HOTEL_MANAGER // operational + marketing access (Phase 6)
+  MARKETING_MANAGER
+  RESTAURANT_MANAGER
+  FRONT_DESK
+  HOTEL_STAFF
+  // Phase 13 — restaurant staff roles (appended: PostgreSQL enum values
+  // must be added at the END for existing installations to migrate safely).
+  CASHIER // POS billing view, order payment context
+  KITCHEN_STAFF // KDS queue + item availability only
+  WAITER // floor/table overview, order taking, serve
+}
+
+// Phase 3 — one-time owner invitation / activation tokens (only the HASH is stored)
+model ActivationToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  purpose   String    @default("OWNER_INVITATION") // OWNER_INVITATION | PASSWORD_RESET
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+enum HotelStatus {
+  ACTIVE
+  SUSPENDED
+  ARCHIVED
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  PENDING
+}
+
+enum CustomerStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model Hotel {
+  id        String      @id @default(uuid())
+  name      String
+  location  String?
+  phone     String?
+  email     String?
+  status    HotelStatus @default(ACTIVE)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  // Phase 6 — tenant extensions
+  tenantId         String? // super-admin tenant grouping (one tenant per hotel for MVP)
+  address          String?
+  city             String?
+  state            String?
+  country          String?
+  website          String?
+  gstin            String?
+  timezone         String?   @default("Asia/Kolkata")
+  currency         String?   @default("INR")
+  planId           String?
+  plan             Plan?     @relation(fields: [planId], references: [id], onDelete: SetNull)
+  suspendedAt      DateTime?
+  suspensionReason String?
+
+  users                   User[]
+  customers               Customer[]
+  visits                  Visit[]
+  auditLogs               AuditLog[]
+  // Phase 2
+  segments                Segment[]
+  campaigns               Campaign[]
+  campaignMessages        CampaignMessage[]
+  followUpSteps           FollowUpStep[]
+  // Phase 3
+  coupons                 Coupon[]
+  journeys                Journey[]
+  // Phase 4
+  automationRules         AutomationRule[]
+  leadEvents              LeadEvent[]
+  // Phase 5
+  restaurantVisits        RestaurantVisit[]
+  restaurantOrders        RestaurantOrder[]
+  // Phase 6
+  tenantFeatures          TenantFeature[]
+  usageRecords            UsageRecord[]
+  subscriptions           Subscription[]
+  supportSessions         SupportSession[]
+  integrations            Integration[]
+  notifications           Notification[]
+  // Phase 6.3 — restaurant growth
+  loyaltySettings         LoyaltySettings?
+  loyaltyAccounts         LoyaltyAccount[]
+  loyaltyTransactions     LoyaltyTransaction[]
+  qrCodes                 QRCode[]
+  feedbacks               Feedback[]
+  messageTemplates        MessageTemplate[]
+  hotelSettings           HotelSettings?
+  // Phase 7 — background jobs (campaign sends, exports)
+  backgroundJobs          BackgroundJob[]
+  // Phase 10 — SaaS billing
+  payments                Payment[]
+  // Phase 11 — developer API keys (SYNCHRONIZED from the dev schema — this
+  // was the confirmed production-schema gap: the ApiKey model existed only in
+  // the SQLite dev schema, so the PostgreSQL client typecheck/build failed
+  // and production installations could not migrate the table in.)
+  apiKeys                 ApiKey[]
+  // Phase 12 — restaurant menu & tables
+  menuCategories          MenuCategory[]
+  menuItems               MenuItem[]
+  menuOptionGroups        MenuOptionGroup[]
+  menuOptions             MenuOption[]
+  diningTables            DiningTable[]
+  // Phase 13 — ordering, sessions, staff
+  tableSessions           TableSession[]
+  diningOrders            DiningOrder[]
+  orderEvents             OrderEvent[]
+  // Phase 11 — journey execution
+  journeyEnrollments      JourneyEnrollment[]
+  journeyStepDeliveries   JourneyStepDelivery[]
+  // Phase 14 — POS, GST billing & restaurant payments
+  taxRules                TaxRule[]
+  invoiceSequences        InvoiceSequence[]
+  bills                   Bill[]
+  billPayments            BillPayment[]
+  billRefunds             BillRefund[]
+  cashSessions            CashSession[]
+  // Phase 15 — retention & marketing
+  referralProgram         ReferralProgram?
+  referralCodes           ReferralCode[]
+  referrals               Referral[]
+  promotions              Promotion[]
+  paymentLinks            PaymentLink[]
+  reportSchedule          ReportSchedule?
+  restaurantWebhookEvents RestaurantWebhookEvent[]
+  // Phase 16 — operations
+  reservations            Reservation[]
+  ingredients             Ingredient[]
+  stockLedger             StockLedger[]
+  recipeLines             RecipeLine[]
+  suppliers               Supplier[]
+  purchaseOrders          PurchaseOrder[]
+  stockCounts             StockCount[]
+  attendanceRecords       AttendanceRecord[]
+  shiftAssignments        ShiftAssignment[]
+  branchMembership        BranchMembership?
+  branchMenuOverrides     BranchMenuOverride[]
+  whiteLabelConfig        WhiteLabelConfig?
+  customRoles             CustomRole[]
+  webhookEndpoints        WebhookEndpoint[]
+  privacyRequests         PrivacyRequest[]
+  subscriptionMandates    SubscriptionMandate[]
+  subscriptionRefunds     SubscriptionRefund[]
+  competitorBenchmarks    CompetitorBenchmark[]
+
+  // Phase 18 — advanced AI & innovation
+  aiSettings              AISettings?
+  aiConversations         AIConversation[]
+  aiInteractionLogs       AIInteractionLog[]
+  demandForecasts         DemandForecast[]
+  aiRecommendations       AIRecommendation[]
+  walletPasses            WalletPass[]
+  sustainabilityBadges    SustainabilityBadge[]
+
+  @@index([status])
+  @@index([planId])
+}
+
+model User {
+  id                  String     @id @default(uuid())
+  hotelId             String?
+  hotel               Hotel?     @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name                String
+  email               String     @unique
+  passwordHash        String
+  role                UserRole   @default(HOTEL_STAFF)
+  status              UserStatus @default(ACTIVE)
+  // Phase 6 — security extensions
+  mfaEnabled          Boolean    @default(false)
+  mfaSecret           String?
+  // Phase 10 — TOTP MFA (RFC 6238) + single-use hashed backup codes
+  mfaBackupCodes      String? // JSON array of sha256-hashed backup codes
+  mfaEnforcedAt       DateTime? // when MFA policy began applying to this user
+  lastLoginAt         DateTime?
+  lastLoginIp         String?
+  failedLoginAttempts Int        @default(0)
+  lockedUntil         DateTime?
+  // Phase 2 hardening — secure bootstrap/invitation
+  mustChangePassword  Boolean    @default(false)
+  // Phase 9 — session revocation: bump to invalidate all issued tokens
+  tokenVersion        Int        @default(0)
+  // Phase 7 — email verification (null = not yet verified)
+  emailVerified       DateTime?
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+
+  // Phase 16 — staff operations
+  attendanceRecords     AttendanceRecord[]
+  shiftAssignments      ShiftAssignment[]
+  auditLogs             AuditLog[]
+  supportSessions       SupportSession[]
+  leadEvents            LeadEvent[]
+  activationTokens      ActivationToken[]
+  customRoleAssignments CustomRoleAssignment[]
+  abassignments         ABAssignment[]
+
+  @@index([hotelId])
+  @@index([role])
+}
+
+model Customer {
+  id                    String         @id @default(uuid())
+  hotelId               String
+  hotel                 Hotel          @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name                  String
+  phone                 String
+  email                 String?
+  marketingConsent      Boolean        @default(false)
+  consentTimestamp      DateTime?
+  consentSource         String?
+  optOut                Boolean        @default(false)
+  status                CustomerStatus @default(ACTIVE)
+  // ---- Phase 2: customer intelligence fields ----
+  roomPreference        String?
+  foodPreference        String?
+  location              String?
+  birthday              DateTime?
+  anniversary           DateTime?
+  source                String?
+  notes                 String?
+  vip                   Boolean        @default(false)
+  // ---- Phase 3: extended CRM fields ----
+  whatsappOptIn         Boolean        @default(false)
+  smsOptIn              Boolean        @default(false)
+  emailOptIn            Boolean        @default(false)
+  preferredRoom         String?
+  preferredService      String?
+  loyaltyPoints         Int            @default(0)
+  recencyScore          Int            @default(0)
+  frequencyScore        Int            @default(0)
+  monetaryScore         Int            @default(0)
+  customerValueScore    Int            @default(0)
+  leadScore             Int            @default(0) // Phase 4
+  leadTier              String? // COLD | WARM | HOT | VERY_HOT (Phase 4)
+  // ---- Phase 5: restaurant intelligence ----
+  favouriteItems        String? // JSON array of items
+  favouriteCategory     String?
+  diningFrequency       Int            @default(0)
+  lastRestaurantVisit   DateTime?
+  totalRestaurantVisits Int            @default(0)
+  totalRestaurantSpend  Float          @default(0)
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  visits               Visit[]
+  segments             SegmentMember[]
+  messages             CampaignMessage[]
+  // Phase 3
+  couponRedemptions    CouponRedemption[]
+  timelineEvents       TimelineEvent[]
+  // Phase 4
+  leadEvents           LeadEvent[]
+  // Phase 5
+  restaurantVisits     RestaurantVisit[]
+  restaurantOrders     RestaurantOrder[]
+  // Phase 4 (automation executions)
+  automationExecutions AutomationExecution[]
+  // Phase 11 — journey enrollments
+  journeyEnrollments   JourneyEnrollment[]
+  // Phase 6.3 — restaurant growth
+  loyaltyAccounts      LoyaltyAccount[]
+  loyaltyTransactions  LoyaltyTransaction[]
+  feedbacks            Feedback[]
+  // Phase 14/15 — POS bills & referral program
+  bills                Bill[]
+  referralCodes        ReferralCode[]        @relation("ReferralCodeOwner")
+  referralsMade        Referral[]            @relation("ReferralsMade")
+  referralsReceived    Referral[]            @relation("ReferralsReceived")
+  // Phase 18 — advanced AI & innovation
+  aiConversations      AIConversation[]
+  aiRecommendations    AIRecommendation[]
+  walletPasses         WalletPass[]
+
+  @@unique([hotelId, phone])
+  @@index([hotelId])
+  @@index([email])
+  @@index([marketingConsent])
+  @@index([status])
+  @@index([vip])
+  @@index([leadTier])
+  @@index([birthday])
+}
+
+model Visit {
+  id         String    @id @default(uuid())
+  hotelId    String
+  hotel      Hotel     @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  customerId String
+  customer   Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  checkin    DateTime
+  checkout   DateTime?
+  source     String    @default("MANUAL")
+  notes      String?
+  amount     Float?
+  roomType   String? // Phase 3 — preferred room tracking
+  guests     Int       @default(1)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([hotelId])
+  @@index([customerId])
+  @@index([checkin])
+  @@index([checkout])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  hotelId    String?
+  hotel      Hotel?   @relation(fields: [hotelId], references: [id], onDelete: SetNull)
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action     String
+  entityType String?
+  entityId   String?
+  metadata   String?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  @@index([hotelId])
+  @@index([action])
+  @@index([createdAt])
+  @@index([userId])
+}
+
+model AuthAttempt {
+  id        String   @id @default(uuid())
+  email     String
+  success   Boolean
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  @@index([email, createdAt])
+}
+
+// =====================
+// Phase 2: Customer Intelligence & Segmentation Engine
+// =====================
+
+enum SegmentType {
+  AUTO
+  MANUAL
+}
+
+enum SegmentMemberSource {
+  AUTO
+  MANUAL
+}
+
+model Segment {
+  id             String      @id @default(uuid())
+  hotelId        String
+  hotel          Hotel       @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name           String
+  description    String?
+  type           SegmentType @default(MANUAL)
+  rule           String?
+  isSystem       Boolean     @default(false)
+  color          String?
+  // Phase 3 — configurable thresholds
+  visitThreshold Int?
+  spendThreshold Float?
+  inactiveDays   Int?
+  lostDays       Int?
+  // Phase 5 — restaurant segments flag
+  domain         String? // HOTEL | RESTAURANT
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  members   SegmentMember[]
+  campaigns Campaign[]
+
+  @@unique([hotelId, name])
+  @@index([hotelId])
+  @@index([type])
+  @@index([domain])
+}
+
+model SegmentMember {
+  id         String              @id @default(uuid())
+  segmentId  String
+  segment    Segment             @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+  customerId String
+  customer   Customer            @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  source     SegmentMemberSource @default(MANUAL)
+  createdAt  DateTime            @default(now())
+
+  @@unique([segmentId, customerId])
+  @@index([customerId])
+  @@index([segmentId])
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  ACTIVE
+  COMPLETED
+  PAUSED // Phase 3
+  FAILED
+  ARCHIVED
+}
+
+enum CampaignScheduleType {
+  NOW
+  SCHEDULED
+  AUTOMATED
+}
+
+model Campaign {
+  id                      String               @id @default(uuid())
+  hotelId                 String
+  hotel                   Hotel                @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name                    String
+  description             String?
+  status                  CampaignStatus       @default(DRAFT)
+  scheduleType            CampaignScheduleType @default(NOW)
+  scheduledAt             DateTime?
+  segmentId               String?
+  segment                 Segment?             @relation(fields: [segmentId], references: [id], onDelete: SetNull)
+  channels                String
+  offer                   String?
+  couponId                String? // Phase 3 — link to coupon
+  coupon                  Coupon?              @relation(fields: [couponId], references: [id], onDelete: SetNull)
+  messageTemplate         String
+  // Recheck fix (D — WhatsApp template wiring): optional link to an APPROVED
+  // WhatsApp MessageTemplate. When set (and the template is provider-approved
+  // for WHATSAPP), the send pipeline transmits a provider TEMPLATE payload
+  // (providerTemplateId + language + positional variables) instead of
+  // free-form text — required for delivery outside WhatsApp's 24-hour
+  // customer-service window. SMS/EMAIL keep the free-form body.
+  messageTemplateId       String?
+  messageTemplateRef      MessageTemplate?     @relation(fields: [messageTemplateId], references: [id], onDelete: SetNull)
+  followUpStepId          String?
+  followUpStep            FollowUpStep?        @relation(fields: [followUpStepId], references: [id], onDelete: SetNull)
+  createdById             String?
+  lastSentAt              DateTime?
+  // Phase 4 — campaign attribution
+  campaignType            String? // THANK_YOU | REVIEW | BIRTHDAY | ANNIVERSARY | REPEAT_BOOKING | SPECIAL_OFFER | FESTIVAL | WEEKEND | REACTIVATION | VIP | WIN_BACK
+  startDate               DateTime?
+  endDate                 DateTime?
+  // Phase 4 — frequency caps
+  frequencyCapPerCustomer Int                  @default(1)
+  frequencyWindowDays     Int                  @default(30)
+  createdAt               DateTime             @default(now())
+  updatedAt               DateTime             @updatedAt
+
+  messages CampaignMessage[]
+
+  @@unique([followUpStepId])
+  @@index([hotelId])
+  @@index([status])
+  @@index([campaignType])
+}
+
+enum MessageChannel {
+  WHATSAPP
+  SMS
+  EMAIL
+}
+
+enum MessageStatus {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
+  // Phase 6.4 — simulation mode is recorded as its own status so a simulated
+  // delivery is NEVER mistaken for a real provider delivery.
+  SIMULATED
+  // Audit fix F07 — delivery-state honesty + concurrency safety:
+  //   UNKNOWN   — the provider call may or may not have completed (crash window).
+  //               UNKNOWN rows are NEVER auto-retried; they need explicit
+  //               provider reconciliation before any resend.
+  //   RETRYING  — an atomic per-message claim held by exactly one retry runner.
+  //               Only the runner that wins the FAILED → RETRYING transition
+  //               may call the provider (prevents concurrent duplicate sends).
+  UNKNOWN
+  RETRYING
+}
+
+model CampaignMessage {
+  id                  String         @id @default(uuid())
+  hotelId             String
+  hotel               Hotel          @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  campaignId          String
+  campaign            Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  customerId          String
+  customer            Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  channel             MessageChannel
+  recipient           String
+  personalizedMessage String
+  status              MessageStatus  @default(PENDING)
+  skipReason          String?
+  provider            String?
+  providerMessageId   String?
+  failureReason       String?
+  sentAt              DateTime?
+  deliveredAt         DateTime?
+  openedAt            DateTime?
+  clickedAt           DateTime?
+  repliedAt           DateTime? // Phase 4 — reply tracking
+  // ---- revenue attribution ----
+  bookingLinked       Boolean        @default(false)
+  bookingAmount       Float?
+  bookingAt           DateTime?
+  // Phase 4 — lead scoring
+  attributedRevenue   Float?         @default(0)
+  // Phase 6 — idempotency key
+  idempotencyKey      String?        @unique
+  // Phase 6.4 — safe retry support (exponential backoff, max attempts)
+  retryCount          Int            @default(0)
+  lastTriedAt         DateTime?
+  createdAt           DateTime       @default(now())
+
+  @@unique([campaignId, customerId, channel])
+  @@index([hotelId])
+  @@index([campaignId])
+  @@index([customerId])
+  @@index([status])
+  @@index([sentAt])
+}
+
+model FollowUpStep {
+  id              String   @id @default(uuid())
+  hotelId         String
+  hotel           Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  offsetDays      Int
+  label           String
+  messageTemplate String
+  channels        String
+  enabled         Boolean  @default(true)
+  sortOrder       Int
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  campaign Campaign?
+
+  @@unique([hotelId, offsetDays])
+  @@index([hotelId])
+}
+
+// =====================
+// Phase 3: Coupons, Loyalty, Customer Timeline, Journeys
+// =====================
+
+enum CouponDiscountType {
+  PERCENTAGE
+  FIXED_AMOUNT
+  CUSTOMER_SPECIFIC
+  ONE_TIME
+}
+
+model Coupon {
+  id               String             @id @default(uuid())
+  hotelId          String
+  hotel            Hotel              @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  code             String // uppercase coupon code
+  description      String?
+  discountType     CouponDiscountType @default(PERCENTAGE)
+  discountValue    Float              @default(0) // percentage or amount
+  minimumOrder     Float?
+  maximumDiscount  Float?
+  validFrom        DateTime?
+  validUntil       DateTime?
+  usageLimit       Int                @default(0) // 0 = unlimited
+  customerLimit    Int                @default(1)
+  active           Boolean            @default(true)
+  // Phase 6 — attribution
+  totalRedemptions Int                @default(0)
+  totalDiscount    Float              @default(0)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  redemptions CouponRedemption[]
+  campaigns   Campaign[]
+  // Phase 18 — AI recommendations referencing this coupon
+  aiRecommendations AIRecommendation[]
+
+  @@unique([hotelId, code])
+  @@index([hotelId])
+  @@index([code])
+}
+
+model CouponRedemption {
+  id             String   @id @default(uuid())
+  couponId       String
+  coupon         Coupon   @relation(fields: [couponId], references: [id], onDelete: Cascade)
+  customerId     String
+  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  hotelId        String
+  orderId        String?
+  orderAmount    Float?
+  discountAmount Float
+  // Phase 13 — concurrency: per-customer slot reservation (DB-arbitrated)
+  redemptionSlot Int      @default(0)
+  redeemedAt     DateTime @default(now())
+
+  @@unique([couponId, customerId, orderId])
+  @@unique([couponId, customerId, redemptionSlot])
+  @@index([couponId])
+  @@index([customerId])
+}
+
+enum TimelineEventType {
+  CUSTOMER_CREATED
+  BOOKING
+  CHECKOUT
+  PAYMENT
+  FEEDBACK
+  CAMPAIGN_SENT
+  CAMPAIGN_OPENED
+  CAMPAIGN_CLICKED
+  CAMPAIGN_REPLIED
+  COUPON_ISSUED
+  COUPON_REDEEMED
+  ADMIN_NOTE
+  SEGMENT_ADDED
+  CONSENT_GRANTED
+  CONSENT_REVOKED
+  BIRTHDAY
+  ANNIVERSARY
+  RESTAURANT_VISIT
+}
+
+model TimelineEvent {
+  id         String            @id @default(uuid())
+  hotelId    String
+  customerId String
+  customer   Customer          @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  type       TimelineEventType
+  label      String
+  detail     String?
+  amount     Float?
+  userId     String?
+  createdAt  DateTime          @default(now())
+
+  @@index([customerId])
+  @@index([hotelId])
+  @@index([type])
+  @@index([createdAt])
+}
+
+model Journey {
+  id          String   @id @default(uuid())
+  hotelId     String
+  hotel       Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  steps       JourneyStep[]
+  enrollments JourneyEnrollment[]
+
+  @@index([hotelId])
+}
+
+model JourneyStep {
+  id              String  @id @default(uuid())
+  journeyId       String
+  journey         Journey @relation(fields: [journeyId], references: [id], onDelete: Cascade)
+  offsetDays      Int
+  label           String
+  messageTemplate String
+  channels        String
+  offer           String?
+  couponId        String?
+  sortOrder       Int
+  enabled         Boolean @default(true)
+
+  deliveries JourneyStepDelivery[]
+
+  @@index([journeyId])
+}
+
+// ---------- Phase 11 — durable journey execution ----------
+
+enum JourneyEnrollmentStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+enum JourneyDeliveryStatus {
+  PENDING
+  SENDING
+  SENT
+  SKIPPED
+  FAILED
+}
+
+model JourneyEnrollment {
+  id            String                  @id @default(uuid())
+  hotelId       String
+  hotel         Hotel                   @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  journeyId     String
+  journey       Journey                 @relation(fields: [journeyId], references: [id], onDelete: Cascade)
+  customerId    String
+  customer      Customer                @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  status        JourneyEnrollmentStatus @default(ACTIVE)
+  enrolledAt    DateTime                @default(now())
+  // Cursor semantics: index of the next step to schedule/deliver. Progress is
+  // persisted PER CUSTOMER here; per-step delivery evidence lives in
+  // JourneyStepDelivery (one row per step/customer/occurrence).
+  nextStepIndex Int                     @default(0)
+  nextStepAt    DateTime?
+  completedAt   DateTime?
+  cancelledAt   DateTime?
+  createdAt     DateTime                @default(now())
+  updatedAt     DateTime                @updatedAt
+
+  deliveries JourneyStepDelivery[]
+
+  @@unique([journeyId, customerId]) // one enrollment per customer per journey
+  @@index([hotelId])
+  @@index([status, nextStepAt])
+}
+
+model JourneyStepDelivery {
+  id            String                @id @default(uuid())
+  enrollmentId  String
+  enrollment    JourneyEnrollment     @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  journeyStepId String
+  journeyStep   JourneyStep           @relation(fields: [journeyStepId], references: [id], onDelete: Cascade)
+  hotelId       String
+  hotel         Hotel                 @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  customerId    String
+  // One delivery reservation per step/customer/occurrence: the calendar date
+  // (UTC day) this occurrence is due — repeated steps (birthdays) get a new
+  // key next year, so the unique constraint enforces exactly-once per run.
+  occurrenceKey String
+  status        JourneyDeliveryStatus @default(PENDING)
+  // BUG-5/D12: durable retry budget — a delivery is retried by the sweep
+  // until this hits the cap, instead of being silently dropped after the
+  // first transient failure.
+  retryCount    Int                   @default(0)
+  scheduledFor  DateTime
+  messageId     String? // CampaignMessage once sent
+  sentAt        DateTime?
+  error         String?
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+
+  @@unique([enrollmentId, journeyStepId, occurrenceKey])
+  @@index([status, scheduledFor])
+  @@index([hotelId])
+}
+
+// =====================
+// Phase 4: Automation Rules & Lead Scoring
+// =====================
+
+enum AutomationTrigger {
+  HOTEL_CHECKOUT
+  RESTAURANT_VISIT
+  INACTIVE_7
+  INACTIVE_15
+  INACTIVE_30
+  BIRTHDAY
+  ANNIVERSARY
+  VIP_THRESHOLD
+  OFFER_UNUSED
+  REPEAT_VISIT
+  SPECIAL_EVENT
+  CAMPAIGN_OPENED
+  CAMPAIGN_CLICKED
+  CAMPAIGN_REPLIED
+}
+
+enum AutomationStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  ARCHIVED
+  FAILED
+}
+
+model AutomationRule {
+  id              String            @id @default(uuid())
+  hotelId         String
+  hotel           Hotel             @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name            String
+  description     String?
+  trigger         AutomationTrigger
+  waitDays        Int               @default(0)
+  conditions      String? // JSON: list of conditions
+  actions         String // JSON: list of actions
+  channels        String // JSON: list of channels
+  messageTemplate String?
+  offer           String?
+  couponId        String?
+  status          AutomationStatus  @default(DRAFT)
+  runsCount       Int               @default(0)
+  lastRunAt       DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  executions AutomationExecution[]
+
+  @@index([hotelId])
+  @@index([trigger])
+  @@index([status])
+}
+
+enum AutomationExecutionStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+  CANCELLED
+}
+
+model AutomationExecution {
+  id            String                    @id @default(uuid())
+  automationId  String
+  automation    AutomationRule            @relation(fields: [automationId], references: [id], onDelete: Cascade)
+  hotelId       String
+  customerId    String
+  customer      Customer                  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  trigger       String
+  status        AutomationExecutionStatus @default(PENDING)
+  scheduledAt   DateTime
+  executedAt    DateTime?
+  retryCount    Int                       @default(0)
+  failureReason String?
+  result        String? // JSON summary
+  createdAt     DateTime                  @default(now())
+
+  @@index([automationId])
+  @@index([hotelId])
+  @@index([customerId])
+  @@index([status])
+  @@index([scheduledAt])
+}
+
+enum LeadEventType {
+  MESSAGE_OPENED
+  LINK_CLICKED
+  REPLIED
+  OFFER_VIEWED
+  BOOKING_PAGE_VISITED
+  BOOKING_COMPLETED
+  COUPON_REDEEMED
+}
+
+model LeadEvent {
+  id         String        @id @default(uuid())
+  hotelId    String
+  hotel      Hotel         @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  customerId String
+  customer   Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  campaignId String?
+  messageId  String?
+  userId     String?
+  user       User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  type       LeadEventType
+  points     Int           @default(0)
+  metadata   String?
+  createdAt  DateTime      @default(now())
+
+  // Phase 14 — idempotency: the same engagement event can never be recorded twice
+  @@unique([customerId, type, messageId])
+  @@index([customerId])
+  @@index([hotelId])
+  @@index([type])
+}
+
+// =====================
+// Phase 5: Restaurant Customer Growth Engine
+// =====================
+
+enum RestaurantVisitSource {
+  WALK_IN
+  RESERVATION
+  ROOM_GUEST
+  EVENT
+  ONLINE_ORDER
+  QR_MENU
+  WIFI_LOGIN
+  FEEDBACK
+  LOYALTY
+}
+
+model RestaurantVisit {
+  id             String                @id @default(uuid())
+  hotelId        String
+  hotel          Hotel                 @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  customerId     String
+  customer       Customer              @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  visitDate      DateTime
+  tableNumber    String?
+  guests         Int                   @default(1)
+  orderAmount    Float                 @default(0)
+  foodCategory   String? // VEG | NON_VEG | JAIN | VEGAN
+  favouriteItems String? // JSON list of items ordered
+  source         RestaurantVisitSource @default(WALK_IN)
+  notes          String?
+  createdAt      DateTime              @default(now())
+
+  orders RestaurantOrder[]
+
+  @@index([hotelId])
+  @@index([customerId])
+  @@index([visitDate])
+  @@index([source])
+}
+
+model RestaurantOrder {
+  id                String           @id @default(uuid())
+  hotelId           String
+  hotel             Hotel            @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  customerId        String
+  customer          Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  restaurantVisitId String?
+  restaurantVisit   RestaurantVisit? @relation(fields: [restaurantVisitId], references: [id], onDelete: SetNull)
+  orderId           String
+  items             String // JSON list
+  totalAmount       Float            @default(0)
+  status            String           @default("COMPLETED")
+  orderedAt         DateTime         @default(now())
+  createdAt         DateTime         @default(now())
+
+  @@index([hotelId])
+  @@index([customerId])
+  @@index([restaurantVisitId])
+}
+
+// LEGACY NOTE (Phase 13): RestaurantOrder above is the Phase 5 analytics-only
+// record (imported/aggregated order history). Live restaurant ordering uses
+// DiningOrder below. Do NOT reinterpret existing rows — the backfill story is
+// documented in PHASE_13_HANDOFF.md.
+
+// =====================
+// Phase 12 — Digital menu & table management
+// =====================
+
+model MenuCategory {
+  id          String   @id @default(uuid())
+  hotelId     String
+  hotel       Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  sortOrder   Int      @default(0)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  items MenuItem[]
+
+  @@index([hotelId])
+  @@index([active, sortOrder])
+}
+
+model MenuItem {
+  id          String       @id @default(uuid())
+  hotelId     String
+  hotel       Hotel        @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  categoryId  String
+  category    MenuCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  // MONEY CONTRACT (Phase 11 decision): all NEW restaurant money fields are
+  // INTEGER MINOR UNITS (paise for INR) with an explicit currency column.
+  // Never floats. Existing legacy Float columns are untouched.
+  priceMinor  Int          @default(0)
+  currency    String       @default("INR")
+  dietaryTags String? // JSON array: ["VEG","NON_VEG","JAIN","VEGAN","SPICY"]
+  imageUrl    String?
+  active      Boolean      @default(true) // catalog visibility (owner/manager)
+  available   Boolean      @default(true) // kitchen availability toggle
+  prepMinutes Int          @default(10)
+  sortOrder   Int          @default(0)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  optionGroups MenuOptionGroup[]
+  orderItems   OrderItem[]
+  recipeLines  RecipeLine[]
+  // Phase 18 — demand forecasting (advisory only)
+  demandForecasts DemandForecast[]
+
+  @@index([hotelId])
+  @@index([categoryId])
+  @@index([active, available])
+}
+
+model MenuOptionGroup {
+  id         String   @id @default(uuid())
+  hotelId    String
+  hotel      Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  menuItemId String
+  menuItem   MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  name       String // e.g. "Size", "Extras"
+  required   Boolean  @default(false)
+  minSelect  Int      @default(0)
+  maxSelect  Int      @default(1)
+  sortOrder  Int      @default(0)
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  options MenuOption[]
+
+  @@index([hotelId])
+  @@index([menuItemId])
+}
+
+model MenuOption {
+  id              String          @id @default(uuid())
+  hotelId         String
+  hotel           Hotel           @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  optionGroupId   String
+  optionGroup     MenuOptionGroup @relation(fields: [optionGroupId], references: [id], onDelete: Cascade)
+  name            String
+  priceDeltaMinor Int             @default(0) // added to the item price (>= 0)
+  sortOrder       Int             @default(0)
+  active          Boolean         @default(true)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@index([hotelId])
+  @@index([optionGroupId])
+}
+
+model DiningTable {
+  id        String   @id @default(uuid())
+  hotelId   String
+  hotel     Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  number    String // display code, e.g. "T1"
+  capacity  Int      @default(4)
+  zone      String? // e.g. "Garden", "Floor 2"
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  qrCodes      QRCode[]
+  sessions     TableSession[]
+  orders       DiningOrder[]
+  bills        Bill[]
+  reservations Reservation[]
+
+  @@unique([hotelId, number])
+  @@index([hotelId])
+  @@index([active])
+}
+
+// =====================
+// Phase 13 — Ordering, table sessions, KDS
+// =====================
+
+enum TableSessionStatus {
+  OPEN
+  CLOSED
+}
+
+model TableSession {
+  id          String             @id @default(uuid())
+  hotelId     String
+  hotel       Hotel              @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  tableId     String
+  table       DiningTable        @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  status      TableSessionStatus @default(OPEN)
+  guestName   String?
+  guestPhone  String?
+  openedAt    DateTime           @default(now())
+  closedAt    DateTime?
+  // Guess-resistant public token — the ONLY handle a diner gets. Scope-limited:
+  // exposes this session's orders only, never other tables or customer data.
+  publicToken String             @unique
+  // BUG-8/D05 fence: exactly ONE OPEN session per table. `openFence` is 1
+  // while the session is OPEN and NULL once closed — the (tableId, openFence)
+  // unique constraint lets the DATABASE reject a second concurrent OPEN
+  // session for the same table (NULLs are distinct in unique indexes on BOTH
+  // SQLite and PostgreSQL, so closed sessions never collide).
+  openFence   Int?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  orders DiningOrder[]
+  bills  Bill[]
+
+  @@unique([tableId, openFence])
+  @@index([hotelId])
+  @@index([tableId])
+  @@index([status])
+}
+
+enum DiningOrderStatus {
+  PLACED // submitted by customer (QR) or staff
+  PREPARING // kitchen accepted & started
+  READY // all items ready
+  SERVED // waiter served the table
+  CANCELLED
+}
+
+enum DiningOrderSource {
+  QR_CUSTOMER
+  STAFF
+}
+
+enum OrderItemStatus {
+  PENDING
+  PREPARING
+  READY
+  SERVED
+  CANCELLED
+}
+
+model DiningOrder {
+  id             String            @id @default(uuid())
+  hotelId        String
+  hotel          Hotel             @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  tableSessionId String?
+  tableSession   TableSession?     @relation(fields: [tableSessionId], references: [id], onDelete: SetNull)
+  tableId        String?
+  table          DiningTable?      @relation(fields: [tableId], references: [id], onDelete: SetNull)
+  // Per-tenant sequential order number (readable in kitchen/receipts).
+  orderNumber    Int
+  status         DiningOrderStatus @default(PLACED)
+  source         DiningOrderSource @default(QR_CUSTOMER)
+  // Server-computed totals from the CURRENT valid catalog at submit time —
+  // client-submitted totals are never trusted.
+  subtotalMinor  Int               @default(0)
+  totalMinor     Int               @default(0)
+  currency       String            @default("INR")
+  notes          String?
+  customerName   String? // optional guest identity (product policy: guest ordering allowed)
+  customerPhone  String?
+  // Guess-resistant public tracking token (separate from the session token).
+  publicToken    String            @unique
+  // Idempotency: a network retry with the same key returns the same order —
+  // a timeout must never create a duplicate order.
+  idempotencyKey String?           @unique
+  placedByUserId String? // staff user id when source = STAFF
+  placedAt       DateTime          @default(now())
+  servedAt       DateTime?
+  cancelledAt    DateTime?
+  cancelReason   String?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  items  OrderItem[]
+  events OrderEvent[]
+
+  @@unique([hotelId, orderNumber])
+  @@index([hotelId])
+  @@index([tableSessionId])
+  @@index([status])
+  @@index([placedAt])
+}
+
+model OrderItem {
+  id              String          @id @default(uuid())
+  orderId         String
+  order           DiningOrder     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  // SetNull: archived/deleted menu items keep their line snapshot on bills.
+  menuItemId      String?
+  menuItem        MenuItem?       @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
+  // IMMUTABLE SNAPSHOT — what the diner actually ordered, at catalog prices
+  // resolved server-side at submit time. Catalog edits never rewrite history.
+  nameSnapshot    String
+  unitPriceMinor  Int
+  quantity        Int             @default(1)
+  optionsSnapshot String? // JSON [{groupId,groupName,optionId,optionName,priceDeltaMinor}]
+  lineTotalMinor  Int
+  notes           String?
+  status          OrderItemStatus @default(PENDING)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@index([orderId])
+  @@index([menuItemId])
+}
+
+enum OrderEventType {
+  ORDER_PLACED
+  ORDER_CONFIRMED // system acknowledged / kitchen saw it
+  ITEM_PREPARING
+  ITEM_READY
+  ORDER_READY
+  ITEM_SERVED
+  ORDER_SERVED
+  ORDER_CANCELLED
+  NOTE_ADDED
+  // BUG-1 fix (appended at the END — PostgreSQL enum values can only be
+  // added at the end of an existing type; see migration 0006).
+  ORDER_PREPARING // order-level PLACED→PREPARING / derived from item Start
+  ITEM_CANCELLED // individual item cancellation (distinct from order cancel)
+}
+
+model OrderEvent {
+  id        String         @id @default(uuid())
+  orderId   String
+  order     DiningOrder    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  hotelId   String
+  hotel     Hotel          @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  type      OrderEventType
+  actorType String // CUSTOMER | STAFF | SYSTEM
+  actorId   String?
+  actorName String?
+  metadata  String? // JSON (item ids, reasons, …) — never secrets
+  createdAt DateTime       @default(now())
+
+  @@index([orderId])
+  @@index([hotelId])
+  @@index([createdAt])
+}
+
+// =====================
+// Phase 6: Super Admin, Tenants, Subscriptions, Feature Flags
+// =====================
+
+model Plan {
+  id                   String   @id @default(uuid())
+  name                 String   @unique // display name (unique)
+  key                  String   @unique // internal stable key (slug)
+  description          String?
+  monthlyPrice         Float    @default(0)
+  // Phase 10 — full dynamic pricing (DB is the source of truth; never hardcoded in frontend)
+  yearlyPrice          Float    @default(0)
+  currency             String   @default("INR")
+  setupFee             Float    @default(0)
+  trialDays            Int      @default(0) // 0 = no trial for this plan
+  graceDays            Int      @default(0) // grace period after trial/expiry
+  isActive             Boolean  @default(true)
+  isArchived           Boolean  @default(false) // archive instead of delete when subs exist
+  isPublic             Boolean  @default(true) // visible on public pricing page
+  recommended          Boolean  @default(false)
+  sortOrder            Int      @default(0)
+  features             String? // JSON string array of feature keys enabled for the plan
+  customerLimit        Int      @default(0)
+  campaignLimit        Int      @default(0)
+  messageLimit         Int      @default(0)
+  staffLimit           Int      @default(0)
+  aiUsageLimit         Int      @default(0)
+  storageMb            Int      @default(100)
+  // Phase 10 — dynamic feature limits (0 = unlimited, matching existing semantics)
+  apiRequestLimit      Int      @default(0)
+  exportsLimit         Int      @default(0)
+  locationsLimit       Int      @default(0)
+  restaurantsLimit     Int      @default(0)
+  whatsappMessageLimit Int      @default(0)
+  smsMessageLimit      Int      @default(0)
+  // BUG-7/D17 fix: dedicated menu-catalog entitlement (0 = unlimited). This
+  // previously (incorrectly) reused restaurantsLimit — the number of
+  // restaurant LOCATIONS a plan allows — as the number of menu items.
+  menuItemsLimit       Int      @default(0)
+  apiAccess            Boolean  @default(false)
+  advancedAnalytics    Boolean  @default(false)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  hotels        Hotel[]
+  subscriptions Subscription[]
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+  SUSPENDED
+  TRIALING
+  // Phase 10 — full SaaS trial/grace lifecycle
+  GRACE
+  EXPIRED
+  PAUSED
+}
+
+enum BillingCycle {
+  MONTHLY
+  YEARLY
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum BillingCouponType {
+  PERCENT
+  FIXED
+}
+
+model Subscription {
+  id                 String             @id @default(uuid())
+  hotelId            String
+  hotel              Hotel              @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  planId             String
+  plan               Plan               @relation(fields: [planId], references: [id], onDelete: Cascade)
+  status             SubscriptionStatus @default(ACTIVE)
+  billingCycle       BillingCycle       @default(MONTHLY)
+  startedAt          DateTime           @default(now())
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  cancelAt           DateTime?
+  amount             Float              @default(0)
+  currency           String             @default("INR")
+  // Phase 10 — trial engine + provider linkage
+  trialStartsAt      DateTime?
+  trialEndsAt        DateTime?
+  graceEndsAt        DateTime?
+  pausedAt           DateTime?
+  cancelledAt        DateTime?
+  expiredAt          DateTime?
+  provider           String? // razorpay | stripe | manual
+  providerRef        String? // provider subscription/order reference
+  nextInvoiceAt      DateTime?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  payments Payment[]
+
+  @@index([hotelId])
+  @@index([status])
+  @@index([trialEndsAt])
+}
+
+// Phase 10 — billing payments / invoices (provider-agnostic)
+model Payment {
+  id                String        @id @default(uuid())
+  hotelId           String
+  hotel             Hotel         @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  subscriptionId    String?
+  subscription      Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+  planId            String?
+  invoiceNumber     String        @unique
+  description       String?
+  amount            Float         @default(0)
+  discountAmount    Float         @default(0)
+  currency          String        @default("INR")
+  status            PaymentStatus @default(PENDING)
+  provider          String        @default("manual") // razorpay | stripe | manual
+  providerPaymentId String?       @unique
+  providerOrderId   String?
+  idempotencyKey    String?       @unique
+  couponId          String?
+  couponCode        String?
+  billingCycle      BillingCycle  @default(MONTHLY)
+  failureReason     String?
+  refundedAmount    Float         @default(0)
+  metadata          String? // JSON (webhook event id, etc.)
+  paidAt            DateTime?
+  refundedAt        DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  @@index([hotelId])
+  @@index([status])
+  @@index([subscriptionId])
+}
+
+// Phase 10 — billing coupons / discounts (platform level)
+model BillingCoupon {
+  id                String            @id @default(uuid())
+  code              String            @unique
+  description       String?
+  discountType      BillingCouponType @default(PERCENT)
+  percentOff        Int? // 1..100 for PERCENT
+  amountOff         Float? // fixed currency amount for FIXED
+  maxDiscountAmount Float? // cap for PERCENT coupons
+  minAmount         Float? // minimum order amount
+  usageLimit        Int? // total redemptions allowed (null = unlimited)
+  perTenantLimit    Int? // redemptions per tenant (null = unlimited)
+  usedCount         Int               @default(0)
+  usedByTenants     Int               @default(0)
+  startsAt          DateTime?
+  expiresAt         DateTime?
+  applicablePlans   String? // JSON array of plan keys (null = all plans)
+  isActive          Boolean           @default(true)
+  createdBy         String?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  @@index([isActive])
+}
+
+// Phase 10 — global feature flags with optional scheduling + force (kill switch)
+model GlobalFeatureFlag {
+  id           String    @id @default(uuid())
+  key          String    @unique
+  description  String?
+  enabled      Boolean   @default(true)
+  force        Boolean   @default(false) // true = overrides per-hotel overrides (emergency kill switch)
+  activateAt   DateTime? // scheduled activation
+  deactivateAt DateTime? // scheduled deactivation
+  notes        String?
+  updatedBy    String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+// Phase 10 — platform settings (database as the source of truth for all SaaS knobs)
+model PlatformSetting {
+  key       String   @id
+  value     String // JSON
+  updatedAt DateTime @updatedAt
+}
+
+// Phase 10 — security events feed for the Security Centre
+model SecurityEvent {
+  id         String    @id @default(uuid())
+  type       String // FAILED_LOGIN | LOCKOUT | RATE_LIMITED | CSRF_BLOCKED | SUSPICIOUS | SESSION_REVOKED | MFA_DISABLED | ...
+  severity   String    @default("INFO") // INFO | WARNING | CRITICAL
+  userId     String?
+  email      String?
+  hotelId    String?
+  ipAddress  String?
+  userAgent  String?
+  details    String? // JSON
+  reviewedAt DateTime?
+  reviewedBy String?
+  createdAt  DateTime  @default(now())
+
+  @@index([type])
+  @@index([severity])
+  @@index([createdAt])
+}
+
+// Phase 10 — backup records (scheduled + manual, encrypted, verifiable)
+model BackupRecord {
+  id            String    @id @default(uuid())
+  status        String    @default("PENDING") // PENDING | RUNNING | SUCCESS | FAILED
+  filename      String?
+  sizeBytes     Int       @default(0)
+  checksum      String?
+  encrypted     Boolean   @default(true)
+  storagePath   String?
+  triggeredBy   String?
+  triggerReason String?
+  error         String?
+  durationMs    Int       @default(0)
+  verifiedAt    DateTime?
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+// Phase 10 — platform notification templates (trial/billing/security emails)
+model PlatformNotificationTemplate {
+  id        String   @id @default(uuid())
+  key       String   @unique // trial_started | trial_ending | payment_successful | ...
+  name      String
+  channel   String   @default("EMAIL") // EMAIL | SMS | WHATSAPP
+  subject   String?
+  body      String // supports {{tenant_name}} variables
+  variables String? // JSON array of supported variable names
+  isActive  Boolean  @default(true)
+  updatedBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model TenantFeature {
+  id         String   @id @default(uuid())
+  hotelId    String
+  hotel      Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  featureKey String // ROOM_CRM | RESTAURANT_CRM | WHATSAPP | SMS | EMAIL | AI_ASSISTANT | API | ANALYTICS ...
+  enabled    Boolean  @default(true)
+  updatedBy  String?
+  updatedAt  DateTime @updatedAt
+  createdAt  DateTime @default(now())
+
+  @@unique([hotelId, featureKey])
+  @@index([hotelId])
+}
+
+model UsageRecord {
+  id               String   @id @default(uuid())
+  hotelId          String
+  hotel            Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  period           String // YYYY-MM
+  customers        Int      @default(0)
+  messages         Int      @default(0)
+  campaigns        Int      @default(0)
+  automations      Int      @default(0)
+  apiRequests      Int      @default(0)
+  aiRequests       Int      @default(0)
+  storageMb        Float    @default(0)
+  staff            Int      @default(0)
+  // Phase 10 — additional metered resources
+  exports          Int      @default(0)
+  restaurants      Int      @default(0)
+  locations        Int      @default(0)
+  whatsappMessages Int      @default(0)
+  smsMessages      Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([hotelId, period])
+  @@index([hotelId])
+}
+
+enum SupportSessionStatus {
+  REQUESTED
+  ACTIVE
+  EXPIRED
+  ENDED
+}
+
+model SupportSession {
+  id              String               @id @default(uuid())
+  hotelId         String
+  hotel           Hotel                @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  adminUserId     String
+  adminUser       User                 @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  reason          String
+  durationMinutes Int
+  startedAt       DateTime             @default(now())
+  expiresAt       DateTime
+  endedAt         DateTime?
+  status          SupportSessionStatus @default(REQUESTED)
+  createdAt       DateTime             @default(now())
+
+  @@index([hotelId])
+  @@index([adminUserId])
+  @@index([status])
+  @@index([expiresAt])
+}
+
+enum IntegrationType {
+  WHATSAPP_CLOUD
+  TWILIO_SMS
+  SMTP
+  STRIPE
+  RAZORPAY
+  ZOMATO
+  SWIGGY
+  POS
+  GOOGLE_CALENDAR
+  CALENDLY
+  CUSTOM_WEBHOOK
+}
+
+enum IntegrationStatus {
+  CONNECTED
+  DISCONNECTED
+  ERROR
+  PENDING
+  // Audit fix F04 — honest connection states. Saving credentials alone no
+  // longer claims CONNECTED: the credential set starts SAVED_UNVERIFIED, is
+  // promoted to VERIFIED only after a real provider connectivity check, and
+  // drops to ERROR when a live check fails.
+  SAVED_UNVERIFIED
+  VERIFIED
+}
+
+model Integration {
+  id          String            @id @default(uuid())
+  hotelId     String
+  hotel       Hotel             @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  type        IntegrationType
+  name        String
+  status      IntegrationStatus @default(PENDING)
+  credentials String? // JSON (encrypted at rest in production)
+  lastSyncAt  DateTime?
+  lastError   String?
+  enabled     Boolean           @default(true)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@index([hotelId])
+  @@index([type])
+  @@index([status])
+}
+
+enum NotificationLevel {
+  INFO
+  WARNING
+  ERROR
+  CRITICAL
+}
+
+model Notification {
+  id        String            @id @default(uuid())
+  hotelId   String
+  hotel     Hotel             @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  level     NotificationLevel @default(INFO)
+  title     String
+  message   String
+  read      Boolean           @default(false)
+  metadata  String?
+  createdAt DateTime          @default(now())
+
+  @@index([hotelId])
+  @@index([read])
+  @@index([createdAt])
+}
+
+// =====================
+// Phase 6.3 — Restaurant & Café CRM: Loyalty, QR, Feedback, Templates
+// =====================
+
+enum LoyaltyMode {
+  POINTS // ₹100 spent → pointsPer100 points
+  VISITS // each visit → pointsPerVisit points
+}
+
+enum LoyaltyTxnType {
+  EARN // points from spend (POINTS mode)
+  EARN_VISIT // points from a visit (VISITS mode)
+  REDEEM // points redeemed for a reward (negative)
+  ADJUST // manual staff adjustment (+/-)
+  SIGNUP_BONUS
+  REVERSAL // Phase 6.4 — compensating entry when a visit is edited/deleted
+  VISIT_ADJUST // Phase 6.4 — delta entry when a visit amount is corrected
+}
+
+model LoyaltySettings {
+  id              String      @id @default(uuid())
+  hotelId         String      @unique
+  hotel           Hotel       @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  enabled         Boolean     @default(true)
+  mode            LoyaltyMode @default(POINTS)
+  pointsPer100    Int         @default(10) // POINTS mode: points per ₹100 spent
+  pointsPerVisit  Int         @default(50) // VISITS mode: points per visit
+  pointsForReward Int         @default(500) // points needed to unlock a reward
+  rewardValue     Float       @default(100) // ₹ value of one reward
+  signupBonus     Int         @default(50) // welcome points when a customer joins
+  silverTierSpend Float       @default(5000) // lifetime restaurant spend for SILVER
+  goldTierSpend   Float       @default(15000) // lifetime restaurant spend for GOLD
+  vipTierSpend    Float       @default(50000) // lifetime restaurant spend for VIP
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@index([hotelId])
+}
+
+model LoyaltyAccount {
+  id               String   @id @default(uuid())
+  hotelId          String
+  hotel            Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  customerId       String
+  customer         Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  points           Int      @default(0) // current redeemable balance
+  lifetimePoints   Int      @default(0)
+  lifetimeSpend    Float    @default(0) // lifetime restaurant spend captured via loyalty
+  visitsCounted    Int      @default(0)
+  tier             String   @default("BRONZE") // BRONZE | SILVER | GOLD | VIP
+  lastAwardVisitId String? // last restaurant visit already awarded (idempotency)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  transactions LoyaltyTransaction[]
+
+  @@unique([hotelId, customerId])
+  @@index([hotelId])
+  @@index([customerId])
+  @@index([tier])
+}
+
+model LoyaltyTransaction {
+  id             String         @id @default(uuid())
+  hotelId        String
+  hotel          Hotel          @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  accountId      String
+  account        LoyaltyAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  customerId     String
+  customer       Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  type           LoyaltyTxnType
+  points         Int // positive = earn, negative = redeem/reversal
+  reason         String?
+  visitId        String?
+  actorId        String? // staff user who caused this entry (nullable for system)
+  idempotencyKey String?        @unique // deterministic key — exactly-once ledger writes
+  balanceBefore  Int            @default(0)
+  balanceAfter   Int            @default(0)
+  createdAt      DateTime       @default(now())
+
+  @@index([hotelId])
+  @@index([accountId])
+  @@index([customerId])
+  @@index([visitId])
+  @@index([createdAt])
+}
+
+enum QRCodeType {
+  MENU // restaurant page / menu
+  LOYALTY // loyalty join page
+  FEEDBACK // feedback page
+  ORDER // online ordering entry
+}
+
+model QRCode {
+  id         String       @id @default(uuid())
+  hotelId    String
+  hotel      Hotel        @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  code       String       @unique // unpredictable public identifier (32 chars, url-safe)
+  type       QRCodeType   @default(LOYALTY)
+  label      String?
+  // Phase 12 — explicit relational binding for MENU/ORDER QR codes: the QR
+  // resolves to THIS table's session context. NULL for LOYALTY/FEEDBACK types
+  // (no table context). Replaces free-text label parsing — the relation is
+  // enforced server-side and survives renames.
+  tableId    String?
+  table      DiningTable? @relation(fields: [tableId], references: [id], onDelete: SetNull)
+  active     Boolean      @default(true)
+  scans      Int          @default(0)
+  joins      Int          @default(0)
+  lastScanAt DateTime?
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  @@index([hotelId])
+  @@index([type])
+  @@index([tableId])
+}
+
+model Feedback {
+  id         String    @id @default(uuid())
+  hotelId    String
+  hotel      Hotel     @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  rating     Int // 1..5
+  comment    String?
+  source     String    @default("QR_PAGE") // QR_PAGE | WEB | MANUAL
+  createdAt  DateTime  @default(now())
+
+  @@index([hotelId])
+  @@index([customerId])
+  @@index([rating])
+  @@index([createdAt])
+}
+
+enum TemplateCategory {
+  WELCOME
+  THANK_YOU
+  COME_BACK
+  BIRTHDAY
+  SPECIAL_OFFER
+  FESTIVAL_OFFER
+  LOYALTY_REWARD
+  INACTIVE_WINBACK
+  VIP_APPRECIATION
+}
+
+model MessageTemplate {
+  id                 String           @id @default(uuid())
+  hotelId            String
+  hotel              Hotel            @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name               String
+  category           TemplateCategory @default(SPECIAL_OFFER)
+  body               String // supports {{name}} {{hotel_name}} {{last_visit}} {{booking_count}} {{offer}} {{booking_link}}
+  channels           String           @default("[\"WHATSAPP\"]") // JSON array
+  isDefault          Boolean          @default(false) // platform-provided default (cannot be deleted, can be edited)
+  // Audit fix F03 — WhatsApp Cloud API template binding. WhatsApp requires an
+  // APPROVED template for any message sent outside the 24-hour customer-
+  // service window; a local text library alone cannot deliver promotions.
+  // providerTemplateId is the provider-side template name, languageCode its
+  // approved language, variableMap maps our {{placeholders}} to positional
+  // template params (JSON: {"1":"name","2":"offer"}), and approvalStatus
+  // tracks the provider approval lifecycle honestly.
+  providerTemplateId String?
+  languageCode       String?
+  variableMap        String?
+  approvalStatus     String? // DRAFT | PENDING | APPROVED | REJECTED | PAUSED | null (not bound)
+  // Recheck fix (D): campaigns explicitly bound to this approved template.
+  campaigns          Campaign[]
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  @@index([hotelId])
+  @@index([category])
+}
+
+model HotelSettings {
+  id                      String   @id @default(uuid())
+  hotelId                 String   @unique
+  hotel                   Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  // Marketing frequency control (anti-spam) — max marketing messages per customer per window
+  marketingFrequencyLimit Int      @default(3)
+  frequencyWindowDays     Int      @default(30)
+  // Customer-facing consent text shown on the public QR join page
+  consentText             String   @default("I want to receive offers and discounts from this restaurant.")
+  feedbackEnabled         Boolean  @default(true)
+  // Phase 12 — restaurant profile foundation: opening hours per weekday.
+  // JSON: {"mon":[{"open":"11:00","close":"23:00"}], ...} — empty/null =
+  // always open (no gating). Display-only unless gatingEnabled; evaluated in
+  // the TENANT's IANA timezone (Hotel.timezone), UTC storage everywhere.
+  openingHours            String?
+  openingHoursGating      Boolean  @default(false)
+  // Phase 14/15/16 — billing, reputation, reservations & social
+  reviewUrl               String? // legitimate public review URL (verified by owner)
+  feedbackAlertThreshold  Int? // 1..5; low-rating alert threshold (null = off)
+  reservationMaxPartySize Int      @default(20)
+  reservationLeadMinutes  Int      @default(0)
+  socialConfigJson        String? // Phase 15 — draft-mode social targets (no secrets)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  @@index([hotelId])
+}
+
+// =====================
+// Phase 7 — persistent background job queue (campaign sends, CSV exports)
+// =====================
+enum BackgroundJobType {
+  CAMPAIGN_SEND
+  CSV_EXPORT
+  PAYMENT_CONFIRMED
+  // Phase 14/15 — appended at the END (PostgreSQL enum rule)
+  RESTAURANT_BILL_PAID
+  OWNER_REPORT
+}
+
+enum BackgroundJobStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+model BackgroundJob {
+  id          String              @id @default(uuid())
+  hotelId     String?
+  hotel       Hotel?              @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  type        BackgroundJobType
+  status      BackgroundJobStatus @default(QUEUED)
+  // JSON payload (job input). Never contains secrets.
+  payload     String
+  // JSON result summary written on completion.
+  result      String?
+  attempts    Int                 @default(0)
+  maxAttempts Int                 @default(3)
+  // Next eligible execution time (backoff / scheduling).
+  runAt       DateTime            @default(now())
+  // Optimistic worker lock — stale locks are recovered after LOCK_TTL_MS.
+  lockedAt    DateTime?
+  lockedBy    String?
+  lastError   String?
+  createdBy   String?
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  @@index([status, runAt])
+  @@index([hotelId])
+  @@index([type])
+  @@index([createdAt])
+}
+
+// Audit fix F14 — phone-ownership verification for public (anonymous) flows.
+// A QR-join visitor who submits the phone number of an EXISTING customer must
+// prove ownership via OTP before their stored name, consents or loyalty
+// balance are touched or revealed. Codes are stored hashed with a short TTL,
+// a per-hotel+phone attempt ceiling, and single-use consumption.
+model PhoneOtp {
+  id         String    @id @default(uuid())
+  hotelId    String
+  phone      String
+  codeHash   String // sha256(code + salt) — never the plaintext code
+  purpose    String    @default("PUBLIC_JOIN")
+  attempts   Int       @default(0)
+  consumedAt DateTime?
+  expiresAt  DateTime
+  createdAt  DateTime  @default(now())
+
+  @@unique([hotelId, phone, purpose])
+  @@index([hotelId, phone])
+  @@index([expiresAt])
+}
+
+// ---------- Phase 11 — Developer API ----------
+// SYNCHRONIZED from the dev schema (this was the confirmed production-schema
+// gap: ApiKey existed only in prisma/schema.prisma, so PostgreSQL client
+// typecheck/build failed and production migrations could not create the table).
+
+enum ApiKeyStatus {
+  ACTIVE
+  REVOKED
+}
+
+model ApiKey {
+  id          String       @id @default(uuid())
+  hotelId     String
+  hotel       Hotel        @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name        String
+  // Display-safe prefix (first ~14 chars incl. "sk_live_") — the full key is
+  // shown exactly once at creation and only a sha256 hash is stored.
+  prefix      String
+  keyHash     String       @unique
+  scopes      String       @default("[\"read\"]") // JSON array: ["read"] | ["read","write"]
+  status      ApiKeyStatus @default(ACTIVE)
+  requests    Int          @default(0)
+  lastUsedAt  DateTime?
+  createdById String?
+  revokedAt   DateTime?
+  createdAt   DateTime     @default(now())
+
+  @@index([hotelId])
+  @@index([status])
+}
+
+// =====================
+// Phase 14 — POS, GST billing & restaurant payments
+// =====================
+// MONEY CONTRACT (Phase 11 decision, extended): every NEW money column below
+// is INTEGER MINOR UNITS (paise for INR) with an explicit currency string.
+// No floating point ever touches a stored total. Rounding policy: round
+// half-up to the nearest minor unit at the LINE level; bill total is the sum
+// of line totals; a single roundOffMinor row-level adjustment (on Bill) keeps
+// the payable amount a whole rupee where configured. Splits/refunds conserve
+// totals: sum(payments) == paidMinor <= totalMinor; refunds never exceed
+// paidMinor - refundMinor.
+
+/// Effective-dated tax rules per tenant. The Bill freezes the exact rules
+/// applied (taxSnapshot) — later rule edits never mutate issued bills.
+enum TaxRuleType {
+  CGST_SGST // intra-state: rate split equally into CGST + SGST halves
+  IGST // inter-state: full rate as IGST
+  EXEMPT // no tax applied (rule kept for audit trail)
+}
+
+model TaxRule {
+  id            String      @id @default(uuid())
+  hotelId       String
+  hotel         Hotel       @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name          String // e.g. "GST 5% — non-AC dine-in (menu price incl.)"
+  type          TaxRuleType @default(CGST_SGST)
+  rateBps       Int // basis points of the taxable value: 500 = 5.00%
+  isInclusive   Boolean     @default(true) // menu prices already include tax
+  // Scope: ALL items, or only specific categories/items. JSON array of ids.
+  scopeType     String      @default("ALL") // ALL | CATEGORY | ITEM
+  scopeIds      String? // JSON array (scopeType != ALL)
+  effectiveFrom DateTime
+  effectiveTo   DateTime? // null = open-ended until superseded
+  active        Boolean     @default(true)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([hotelId, active])
+  @@index([hotelId, effectiveFrom])
+}
+
+/// Per-tenant sequential invoice numbering with financial-year series
+/// (India FY = Apr 1 → Mar 31). Incremented INSIDE the bill-creation
+/// transaction — concurrent cashiers can never draw the same number.
+model InvoiceSequence {
+  id         String @id @default(uuid())
+  hotelId    String
+  hotel      Hotel  @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  series     String // "2025-26" style financial-year key
+  prefix     String @default("INV")
+  lastNumber Int    @default(0)
+
+  @@unique([hotelId, series])
+}
+
+enum BillStatus {
+  ISSUED
+  PARTIALLY_PAID
+  PARTIALLY_REFUNDED
+  REFUNDED
+  PAID
+  VOID
+}
+
+/// The restaurant invoice. Lines + tax snapshot are immutable at issue;
+/// payments are allocations; refunds/void are owner-authorized and never
+/// erase issued history (a void keeps the bill row with status VOID).
+model Bill {
+  id                 String        @id @default(uuid())
+  hotelId            String
+  hotel              Hotel         @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  billNumber         String // human-readable, e.g. "INV/2025-26/000042"
+  series             String
+  seqNumber          Int
+  status             BillStatus    @default(ISSUED)
+  // Source: orders of one table session (nullable for counter/parcel bills)
+  tableSessionId     String?
+  tableSession       TableSession? @relation(fields: [tableSessionId], references: [id], onDelete: SetNull)
+  tableId            String?
+  table              DiningTable?  @relation(fields: [tableId], references: [id], onDelete: SetNull)
+  currency           String        @default("INR")
+  // Totals — integer minor units, conserved across splits/refunds.
+  subtotalMinor      Int           @default(0) // sum of printed line amounts
+  discountMinor      Int           @default(0) // total discount (coupon/promotion/manual)
+  serviceChargeMinor Int           @default(0)
+  taxMinor           Int           @default(0)
+  roundOffMinor      Int           @default(0) // +/- adjustment so payable is exact
+  totalMinor         Int           @default(0) // payable = subtotal - discount + serviceCharge + tax + roundOff
+  paidMinor          Int           @default(0) // sum of captured/recorded payments
+  refundMinor        Int           @default(0) // sum of refunds
+  // Discount provenance (exactly one of coupon/promotion/manual typically)
+  couponCode         String?
+  couponRedemptionId String?
+  promotionId        String?
+  promotionVersion   Int?
+  promotionLabel     String?
+  discountReason     String? // required for manual discounts (audited)
+  discountByUserId   String? // who authorized the manual discount
+  // Diner identity for loyalty/visit aggregation (optional guest policy)
+  customerId         String?
+  customer           Customer?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  customerName       String?
+  customerPhone      String?
+  // Immutable issue-time snapshots
+  taxSnapshot        String? // JSON: [{ruleId,name,type,rateBps,taxableMinor,taxMinor}]
+  legalSnapshot      String? // JSON: {hotelName,address,gstin,...} frozen at issue
+  notes              String?
+  issuedByUserId     String // plain id (audit), no relation — see ApiKey pattern
+  issuedAt           DateTime      @default(now())
+  paidAt             DateTime? // when the bill became fully paid
+  voidedAt           DateTime?
+  voidReason         String?
+  // One bill per session per client retry (idempotent POS submit)
+  idempotencyKey     String?       @unique
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  lines        BillLine[]
+  payments     BillPayment[]
+  refunds      BillRefund[]
+  paymentLinks PaymentLink[]
+
+  @@unique([hotelId, billNumber])
+  @@index([hotelId, status])
+  @@index([hotelId, issuedAt])
+  @@index([tableSessionId])
+  @@index([customerId])
+}
+
+/// Immutable line snapshot — what was billed, at what price, with the exact
+/// tax breakup for this line. Never rewritten by later catalog/rule edits.
+model BillLine {
+  id                String  @id @default(uuid())
+  billId            String
+  bill              Bill    @relation(fields: [billId], references: [id], onDelete: Cascade)
+  orderId           String? // source dining order
+  orderItemId       String? // source order item snapshot (plain id)
+  nameSnapshot      String
+  hsnCode           String? // optional HSN/SAC for GST invoices
+  quantity          Int
+  unitPriceMinor    Int // printed unit price (inclusive of tax when isInclusive)
+  lineSubtotalMinor Int // quantity × unitPriceMinor
+  discountMinor     Int     @default(0) // allocated discount for this line
+  taxableMinor      Int     @default(0) // value tax is computed on
+  taxMinor          Int     @default(0)
+  lineTotalMinor    Int // final payable for the line (conserved total)
+  taxBreakup        String? // JSON [{name,type,rateBps,amountMinor}]
+
+  @@index([billId])
+}
+
+enum BillPaymentMethod {
+  CASH
+  UPI
+  CARD
+  ONLINE // gateway-collected (Razorpay) — verified server-side
+  OTHER // e.g. meal cards — labelled manually recorded
+}
+
+enum BillPaymentStatus {
+  RECORDED // manually recorded cash/UPI/card — NOT gateway verified
+  CAPTURED // gateway-verified capture
+  FAILED
+  REFUNDED
+}
+
+enum BillPaymentSource {
+  MANUAL // cashier typed it in — always surfaced as "manually recorded"
+  GATEWAY // verified via server order/signature/webhook
+}
+
+/// Payment allocation on a bill. Mixed payments = several rows whose sum
+/// must equal the paid amount. MANUAL rows are explicitly labelled so a
+/// recorded payment is never presented as gateway-verified.
+model BillPayment {
+  id                String            @id @default(uuid())
+  hotelId           String
+  hotel             Hotel             @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  billId            String
+  bill              Bill              @relation(fields: [billId], references: [id], onDelete: Cascade)
+  method            BillPaymentMethod
+  source            BillPaymentSource @default(MANUAL)
+  status            BillPaymentStatus @default(RECORDED)
+  amountMinor       Int
+  currency          String            @default("INR")
+  gateway           String? // "RAZORPAY"
+  gatewayOrderId    String?
+  gatewayPaymentId  String?           @unique // idempotency fence for gateway captures
+  signatureVerified Boolean           @default(false)
+  cashSessionId     String? // plain id — cash reconciliation grouping
+  reference         String? // UTR / auth code / notes reference
+  recordedByUserId  String
+  paidAt            DateTime          @default(now())
+  meta              String? // JSON (never secrets)
+
+  @@index([billId])
+  @@index([hotelId, paidAt])
+  @@index([cashSessionId])
+}
+
+enum BillRefundType {
+  REFUND // money returned against the bill (partial or full)
+  VOID // bill cancelled — audited, never deleted
+}
+
+enum RefundMode {
+  MANUAL // recorded by staff (cash return) — labelled manual
+  GATEWAY // submitted to provider; state reconciled
+  PENDING // gateway submission queued/ambiguous — reconciled later
+}
+
+model BillRefund {
+  id               String         @id @default(uuid())
+  hotelId          String
+  hotel            Hotel          @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  billId           String
+  bill             Bill           @relation(fields: [billId], references: [id], onDelete: Cascade)
+  type             BillRefundType
+  amountMinor      Int
+  currency         String         @default("INR")
+  reason           String
+  mode             RefundMode     @default(MANUAL)
+  gateway          String?
+  gatewayRefundId  String?
+  approvedByUserId String
+  createdAt        DateTime       @default(now())
+
+  @@index([billId])
+  @@index([hotelId])
+}
+
+/// POS cash drawer session. openFence mirrors the TableSession pattern:
+/// openFence = 1 while OPEN (unique per hotel → exactly one open drawer),
+/// NULL once closed (closed sessions never collide).
+enum CashSessionStatus {
+  OPEN
+  CLOSED
+}
+
+model CashSession {
+  id                String            @id @default(uuid())
+  hotelId           String
+  hotel             Hotel             @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  status            CashSessionStatus @default(OPEN)
+  openFence         Int? // 1 while OPEN, NULL when closed
+  openingFloatMinor Int               @default(0)
+  cashSalesMinor    Int? // CASH payments recorded while open
+  refundMinor       Int?
+  adjustmentsMinor  Int?
+  expectedCashMinor Int? // float + sales - refunds + adjustments
+  countedCashMinor  Int?
+  varianceMinor     Int?
+  notes             String?
+  openedByUserId    String
+  closedByUserId    String?
+  openedAt          DateTime          @default(now())
+  closedAt          DateTime?
+
+  @@unique([hotelId, openFence])
+  @@index([hotelId, status])
+  @@index([hotelId, openedAt])
+}
+
+// =====================
+// Phase 15 — retention, marketing & owner reporting
+// =====================
+
+/// Owner-configured referral program (one per hotel).
+model ReferralProgram {
+  id                    String   @id @default(uuid())
+  hotelId               String   @unique
+  hotel                 Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  active                Boolean  @default(true)
+  referrerRewardType    String   @default("POINTS") // POINTS | COUPON_VALUE
+  referrerRewardValue   Int      @default(100) // points, or minor units
+  refereeRewardType     String   @default("POINTS")
+  refereeRewardValue    Int      @default(100)
+  minSpendMinor         Int? // qualifying first paid bill minimum (null = any paid bill)
+  maxRewardsPerReferrer Int? // lifetime cap per referrer (null = uncapped)
+  terms                 String?
+  createdByUserId       String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
+/// Stable, per-customer shareable referral code. Not guessable from customer
+/// ids; the public share/status page exposes NO friend personal data.
+model ReferralCode {
+  id         String   @id @default(uuid())
+  hotelId    String
+  hotel      Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  customerId String
+  customer   Customer @relation("ReferralCodeOwner", fields: [customerId], references: [id], onDelete: Cascade)
+  code       String
+  createdAt  DateTime @default(now())
+
+  @@unique([hotelId, code])
+  @@unique([hotelId, customerId])
+  @@index([hotelId])
+}
+
+enum ReferralStatus {
+  PENDING // referee linked but not yet qualified
+  QUALIFIED // qualifying paid bill observed, reward pending/outbox
+  REWARDED // both-party rewards issued exactly once
+  REJECTED // self-referral / duplicate identity / policy
+}
+
+model Referral {
+  id                 String         @id @default(uuid())
+  hotelId            String
+  hotel              Hotel          @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  referrerCustomerId String
+  referrer           Customer       @relation("ReferralsMade", fields: [referrerCustomerId], references: [id], onDelete: Cascade)
+  refereeCustomerId  String
+  referee            Customer       @relation("ReferralsReceived", fields: [refereeCustomerId], references: [id], onDelete: Cascade)
+  codeId             String?
+  status             ReferralStatus @default(PENDING)
+  qualifiedBillId    String? // plain id of the qualifying Bill
+  rewardedAt         DateTime?
+  rejectReason       String?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  @@unique([hotelId, refereeCustomerId]) // one attribution per referee, ever
+  @@index([hotelId, status])
+}
+
+/// Promotions: percent/flat discounts, happy-hour windows and combo prices.
+/// Server-side application only; issued bills freeze (promotionId, version,
+/// label) — editing a promotion never rewrites issued invoices.
+model Promotion {
+  id              String    @id @default(uuid())
+  hotelId         String
+  hotel           Hotel     @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name            String
+  type            String // PERCENT | FLAT | HAPPY_HOUR | COMBO
+  percentBps      Int? // PERCENT: 2000 = 20% off
+  valueMinor      Int? // FLAT: discount amount; COMBO: fixed combo price
+  itemIdsJson     String? // JSON array of MenuItem ids (scope)
+  categoryIdsJson String? // JSON array of MenuCategory ids (scope)
+  daysOfWeek      String? // JSON ["MON","TUE",...] (hotel-local)
+  startTime       String? // "18:00" hotel-local (HAPPY_HOUR window start)
+  endTime         String? // "20:00" (window end; end exclusive)
+  startDate       DateTime?
+  endDate         DateTime?
+  priority        Int       @default(0) // higher wins when multiple apply
+  stackable       Boolean   @default(false) // may stack with coupons? default no
+  active          Boolean   @default(true)
+  version         Int       @default(1) // bumped on every edit (audit)
+  createdByUserId String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([hotelId, active])
+}
+
+enum PaymentLinkStatus {
+  ACTIVE
+  PAID
+  EXPIRED
+  REVOKED
+  VOID
+}
+
+/// Expiring, guess-resistant payment link for an unpaid bill. Public URL
+/// exposes only amount + restaurant name — never other bills or customer data.
+model PaymentLink {
+  id              String            @id @default(uuid())
+  hotelId         String
+  hotel           Hotel             @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  billId          String
+  bill            Bill              @relation(fields: [billId], references: [id], onDelete: Cascade)
+  token           String            @unique
+  amountMinor     Int
+  currency        String            @default("INR")
+  status          PaymentLinkStatus @default(ACTIVE)
+  expiresAt       DateTime
+  sentVia         String? // WHATSAPP | EMAIL | NONE
+  createdByUserId String
+  paidAt          DateTime?
+  gatewayOrderId  String?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@index([billId])
+  @@index([hotelId, status])
+}
+
+/// Owner report schedule (daily/weekly digest). Times interpreted in the
+/// tenant IANA timezone; scheduler drains due schedules exactly-once.
+model ReportSchedule {
+  id         String    @id @default(uuid())
+  hotelId    String    @unique
+  hotel      Hotel     @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  frequency  String    @default("DAILY") // DAILY | WEEKLY
+  weekday    Int? // 0=Sun..6=Sat for WEEKLY
+  hour       Int       @default(21) // 0-23 hotel-local
+  recipients String    @default("[]") // JSON array of email addresses
+  active     Boolean   @default(true)
+  lastSentAt DateTime?
+  lastResult String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+}
+
+/// Provider webhook dedupe for RESTAURANT payment webhooks (replay defense).
+model RestaurantWebhookEvent {
+  id          String   @id @default(uuid())
+  hotelId     String?
+  hotel       Hotel?   @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  provider    String // RAZORPAY
+  eventId     String // provider event id or receipt hash
+  type        String?
+  status      String   @default("PROCESSED") // PROCESSED | DUPLICATE | FAILED
+  payload     String? // JSON (no secrets)
+  processedAt DateTime @default(now())
+
+  @@unique([provider, eventId])
+  @@index([hotelId])
+}
+
+// =====================
+// Phase 16 — operations, inventory & multi-branch
+// =====================
+
+enum ReservationStatus {
+  PENDING
+  CONFIRMED
+  SEATED
+  CANCELLED
+  NO_SHOW
+  COMPLETED
+}
+
+enum ReservationSource {
+  STAFF
+  PUBLIC
+}
+
+/// Table reservation. Concurrency safety: booking runs inside a transaction
+/// that re-checks overlapping ACTIVE reservations for the same table (and the
+/// (tableId,date,startTime) unique index as a final fence) — two concurrent
+/// requests can never double-book the same table/slot.
+model Reservation {
+  id                String            @id @default(uuid())
+  hotelId           String
+  hotel             Hotel             @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  tableId           String?
+  table             DiningTable?      @relation(fields: [tableId], references: [id], onDelete: SetNull)
+  date              String // local business day "YYYY-MM-DD" (tenant tz)
+  startTime         String // local "HH:MM"
+  durationMinutes   Int               @default(90)
+  partySize         Int
+  status            ReservationStatus @default(PENDING)
+  guestName         String
+  guestPhone        String
+  notes             String?
+  source            ReservationSource @default(STAFF)
+  publicToken       String?           @unique // scoped token for public requests
+  createdByUserId   String?
+  confirmedByUserId String?
+  seatedAt          DateTime?
+  tableSessionId    String? // linked when the guests are seated
+  cancelledAt       DateTime?
+  cancelReason      String?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  @@unique([tableId, date, startTime])
+  @@index([hotelId, date])
+  @@index([hotelId, status])
+}
+
+// ---------- Inventory & recipes ----------
+// Stock policy: consumption is deducted ONCE per paid bill via the ledger
+// unique (ingredientId, refType, refId, reason) fence with
+// refType="BILL", reason=CONSUMPTION. Cancellation/refund does NOT blindly
+// return consumed ingredients (wastage is explicit). Units: base SI-ish
+// units (GRAM/ML/PIECE); conversions done at recipe/purchase entry time.
+
+enum StockReason {
+  OPENING
+  PURCHASE
+  CONSUMPTION
+  WASTAGE
+  ADJUSTMENT
+  TRANSFER_IN
+  TRANSFER_OUT
+  RETURN
+}
+
+model Ingredient {
+  id                 String              @id @default(uuid())
+  hotelId            String
+  hotel              Hotel               @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name               String
+  unit               String              @default("PIECE") // GRAM | KG | ML | LITRE | PIECE
+  costPerUnitMinor   Int                 @default(0) // weighted/last cost basis (minor units)
+  stockQty           Float               @default(0) // current stock in base unit
+  lowStockThreshold  Float               @default(0)
+  active             Boolean             @default(true)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  ledger             StockLedger[]
+  recipeLines        RecipeLine[]
+  purchaseOrderLines PurchaseOrderLine[]
+  stockCountLines    StockCountLine[]
+
+  @@index([hotelId])
+  @@index([hotelId, active])
+}
+
+/// Append-only stock ledger. balanceAfter makes audits O(1) per row;
+/// the (ingredientId, refType, refId, reason) unique fence guarantees
+/// exactly-once deduction per bill and once per goods receipt.
+model StockLedger {
+  id              String      @id @default(uuid())
+  hotelId         String
+  hotel           Hotel       @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  ingredientId    String
+  ingredient      Ingredient  @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+  reason          StockReason
+  qtyDelta        Float // signed (negative = out)
+  balanceAfter    Float
+  unitCostMinor   Int? // costing at movement time
+  refType         String? // BILL | PURCHASE_ORDER | STOCK_COUNT | MANUAL | BRANCH_TRANSFER
+  refId           String?
+  wastageReason   String? // SPOILAGE | BREAKAGE | SAMPLING | PREP_LOSS | OTHER
+  note            String?
+  createdByUserId String?
+  createdAt       DateTime    @default(now())
+
+  @@unique([ingredientId, refType, refId, reason])
+  @@index([hotelId, createdAt])
+  @@index([ingredientId])
+}
+
+/// Per-menu-item recipe: ingredient quantity per ONE unit of the item
+/// (option/variant deltas are added at billing time via variantKey).
+model RecipeLine {
+  id           String     @id @default(uuid())
+  hotelId      String
+  hotel        Hotel      @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  menuItemId   String
+  menuItem     MenuItem   @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  ingredientId String
+  ingredient   Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+  qtyPerUnit   Float // base units consumed per single item sold
+  variantKey   String? // null = base recipe; else option signature
+
+  @@unique([menuItemId, ingredientId, variantKey])
+  @@index([hotelId])
+}
+
+model Supplier {
+  id             String          @id @default(uuid())
+  hotelId        String
+  hotel          Hotel           @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name           String
+  phone          String?
+  email          String?
+  notes          String?
+  active         Boolean         @default(true)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  purchaseOrders PurchaseOrder[]
+
+  @@index([hotelId])
+}
+
+enum PurchaseOrderStatus {
+  DRAFT
+  SUBMITTED
+  RECEIVED
+  CANCELLED
+}
+
+model PurchaseOrder {
+  id              String              @id @default(uuid())
+  hotelId         String
+  hotel           Hotel               @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  supplierId      String
+  supplier        Supplier            @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  status          PurchaseOrderStatus @default(DRAFT)
+  poNumber        Int // per-hotel sequential (reuse invoice fence)
+  expectedAt      DateTime?
+  receivedAt      DateTime?
+  notes           String?
+  totalMinor      Int                 @default(0)
+  createdByUserId String?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  lines           PurchaseOrderLine[]
+
+  @@unique([hotelId, poNumber])
+  @@index([hotelId, status])
+}
+
+model PurchaseOrderLine {
+  id              String        @id @default(uuid())
+  purchaseOrderId String
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  ingredientId    String
+  ingredient      Ingredient    @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+  qty             Float
+  unitCostMinor   Int
+  lineTotalMinor  Int
+
+  @@index([purchaseOrderId])
+}
+
+enum StockCountStatus {
+  OPEN
+  COMPLETED
+}
+
+model StockCount {
+  id              String           @id @default(uuid())
+  hotelId         String
+  hotel           Hotel            @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  status          StockCountStatus @default(OPEN)
+  countedByUserId String?
+  completedAt     DateTime?
+  note            String?
+  createdAt       DateTime         @default(now())
+  lines           StockCountLine[]
+
+  @@index([hotelId, status])
+}
+
+model StockCountLine {
+  id           String     @id @default(uuid())
+  countId      String
+  count        StockCount @relation(fields: [countId], references: [id], onDelete: Cascade)
+  ingredientId String
+  ingredient   Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+  systemQty    Float
+  countedQty   Float
+  delta        Float // counted - system (applied as ADJUSTMENT on complete)
+
+  @@unique([countId, ingredientId])
+}
+
+// ---------- Staff operations ----------
+
+enum AttendanceStatus {
+  PRESENT
+  LATE
+  HALF_DAY
+  ABSENT
+  LEAVE
+}
+
+model AttendanceRecord {
+  id               String           @id @default(uuid())
+  hotelId          String
+  hotel            Hotel            @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  userId           String
+  user             User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date             String // local business day "YYYY-MM-DD"
+  status           AttendanceStatus @default(PRESENT)
+  clockInAt        DateTime?
+  clockOutAt       DateTime?
+  minutesWorked    Int?
+  approvedByUserId String?
+  approvedAt       DateTime?
+  // Corrections audit: who changed what, when (append to JSON array)
+  correctionLog    String?
+  note             String?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  @@unique([hotelId, userId, date])
+  @@index([hotelId, date])
+}
+
+model ShiftAssignment {
+  id        String   @id @default(uuid())
+  hotelId   String
+  hotel     Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date      String // local business day
+  startTime String // "09:00"
+  endTime   String // "17:00"
+  role      String? // optional shift role label
+  note      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([hotelId, date])
+  @@index([userId, date])
+}
+
+// ---------- Multi-branch ----------
+
+/// Owner-level grouping of branches. Authorization rule: a user may see a
+/// branch's consolidated data iff they hold HOTEL_OWNER/ADMIN on a member
+/// hotel of the SAME group. Super Admin visibility is NOT owner access.
+model BranchGroup {
+  id              String             @id @default(uuid())
+  name            String
+  createdByUserId String?
+  createdAt       DateTime           @default(now())
+  memberships     BranchMembership[]
+}
+
+model BranchMembership {
+  id                      String                 @id @default(uuid())
+  groupId                 String
+  group                   BranchGroup            @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  hotelId                 String                 @unique // a hotel belongs to at most one group
+  hotel                   Hotel                  @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  createdAt               DateTime               @default(now())
+  franchiseOrganization   FranchiseOrganization? @relation(fields: [franchiseOrganizationId], references: [id])
+  franchiseOrganizationId String?
+
+  @@index([groupId])
+}
+
+// =====================
+// Phase 17 — enterprise & platform completion
+// =====================
+
+/// Chain / franchise hierarchy. Extends Phase 16 BranchGroup: an organization
+/// owns multiple branches (Hotels). Central admin membership authorizes
+/// central menu/pricing templates, branch overrides and cross-branch policies.
+/// Authorization rule: a user is a central admin iff they hold HOTEL_OWNER on
+/// a member hotel AND are listed in FranchiseOrganizationAdmin. Super Admin
+/// platform visibility is NOT owner access.
+model FranchiseOrganization {
+  id              String                       @id @default(uuid())
+  name            String
+  legalName       String?
+  taxId           String?
+  currency        String                       @default("INR")
+  timezone        String                       @default("Asia/Kolkata")
+  active          Boolean                      @default(true)
+  createdByUserId String?
+  createdAt       DateTime                     @default(now())
+  updatedAt       DateTime                     @updatedAt
+  admins          FranchiseOrganizationAdmin[]
+  branches        BranchMembership[]
+  menuTemplates   CentralMenuTemplate[]
+  rollout         CentralMenuRollout[]
+}
+
+/// Authorized central admin of a franchise (one user → many orgs allowed).
+/// Role ID stored as text; enforcement that the user actually holds the role
+/// on a member branch is performed at request time (server-side, never UI).
+model FranchiseOrganizationAdmin {
+  id      String                @id @default(uuid())
+  orgId   String
+  org     FranchiseOrganization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  userId  String
+  role    String                @default("CENTRAL_ADMIN") // CENTRAL_ADMIN | CENTRAL_MANAGER
+  addedAt DateTime              @default(now())
+
+  @@unique([orgId, userId])
+  @@index([userId])
+}
+
+/// Central menu template — the canonical catalog pushed to branches. A branch
+/// may override price/availability but never rewrite the template. Issued bills
+/// snapshot from branch overrides + central template at billing time; later
+/// template edits NEVER reinterpret historical invoices.
+model CentralMenuTemplate {
+  id              String                    @id @default(uuid())
+  orgId           String
+  org             FranchiseOrganization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  name            String
+  version         Int                       @default(1)
+  active          Boolean                   @default(true)
+  publishedAt     DateTime?
+  createdByUserId String?
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+  items           CentralMenuTemplateItem[]
+  rollout         CentralMenuRollout[]
+
+  @@index([orgId, active])
+}
+
+/// One row per item in a central menu template. pricing in INTEGER minor
+/// units + currency. Branch overrides apply on top (price delta or
+/// availability) but the template row is the immutable source of item
+/// identity/name/description across the chain.
+model CentralMenuTemplateItem {
+  id                  String               @id @default(uuid())
+  templateId          String
+  template            CentralMenuTemplate  @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  externalCode        String? // stable SKU across branches
+  name                String
+  description         String?
+  priceMinor          Int
+  currency            String               @default("INR")
+  categoryLabel       String?
+  dietaryTags         String? // JSON array
+  sortOrder           Int                  @default(0)
+  active              Boolean              @default(true)
+  branchMenuOverrides BranchMenuOverride[]
+
+  @@index([templateId])
+  @@index([templateId, active])
+}
+
+/// Scheduled versioned rollout of a central menu template to branches.
+/// Status PENDING → IN_PROGRESS → COMPLETED / ROLLED_BACK. Rollback never
+/// changes issued bills — it only restores branch overrides to the previous
+/// template version. Conflicts handled per branch.
+model CentralMenuRollout {
+  id              String                @id @default(uuid())
+  orgId           String
+  org             FranchiseOrganization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  templateId      String
+  template        CentralMenuTemplate   @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  version         Int                   @default(1)
+  scheduledAt     DateTime
+  appliedAt       DateTime?
+  completedAt     DateTime?
+  rolledBackAt    DateTime?
+  status          String                @default("PENDING") // PENDING | IN_PROGRESS | COMPLETED | ROLLED_BACK
+  conflictPolicy  String                @default("SKIP_OVERWRITE") // SKIP_OVERWRITE | FORCE
+  notes           String?
+  createdByUserId String?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  @@index([orgId, status])
+  @@index([templateId])
+}
+
+/// Per-branch override of a central template item. Branch can change price,
+/// availability, or localized name — but the central item identity stays
+/// stable. Issued bills snapshot this row at billing time.
+model BranchMenuOverride {
+  id             String                  @id @default(uuid())
+  hotelId        String
+  hotel          Hotel                   @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  templateItemId String
+  templateItem   CentralMenuTemplateItem @relation(fields: [templateItemId], references: [id], onDelete: Cascade)
+  priceMinor     Int?
+  currency       String? // override currency (rare)
+  available      Boolean?
+  localName      String?
+  active         Boolean                 @default(true)
+  updatedAt      DateTime                @updatedAt
+  createdAt      DateTime                @default(now())
+
+  @@unique([hotelId, templateItemId])
+  @@index([hotelId, active])
+}
+
+// ---------- White-label / custom domain ----------
+
+/// Authorized custom branding for a tenant. Logo/theme/email identity and
+/// custom domain verification. Domain routing secure: no host-header trust,
+/// no domain takeover, no cross-tenant cached pages. TLS setup instructions
+/// only; provisioning via reverse proxy (Caddy/Nginx) in production.
+model WhiteLabelConfig {
+  id                      String    @id @default(uuid())
+  hotelId                 String    @unique
+  hotel                   Hotel     @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  brandName               String?
+  logoUrl                 String?
+  primaryColor            String? // hex
+  accentColor             String?
+  customDomain            String?   @unique
+  domainVerified          Boolean   @default(false)
+  domainVerificationToken String?
+  domainVerifiedAt        DateTime?
+  removePlatformMarks     Boolean   @default(false) // only under configured entitlement
+  featurePlanGated        Boolean   @default(true)
+  updatedByUserId         String?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  @@index([customDomain])
+}
+
+// ---------- Custom roles ----------
+
+/// Owner-defined custom roles using the PERMISSIONS allowlist as a closed
+/// catalog. The owner can only assign permissions they themselves hold;
+/// SUPER_ADMIN platform privileges are never tenant-defined. Changes apply
+/// server-side immediately; sessions may be revoked where necessary.
+model CustomRole {
+  id              String                 @id @default(uuid())
+  hotelId         String
+  hotel           Hotel                  @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name            String
+  description     String?
+  permissions     String // JSON array of permission strings from the allowlist
+  isSystemRole    Boolean                @default(false) // seed of legacy role mapping (read-only)
+  active          Boolean                @default(true)
+  createdByUserId String?
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+  assignments     CustomRoleAssignment[]
+
+  @@unique([hotelId, name])
+  @@index([hotelId, active])
+}
+
+/// Assignment of a custom role to a user. Enforced server-side on every
+/// request; if the role is updated or revoked, the user's session is
+/// invalidated by bumping their tokenVersion.
+model CustomRoleAssignment {
+  id           String     @id @default(uuid())
+  customRoleId String
+  customRole   CustomRole @relation(fields: [customRoleId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assignedBy   String?
+  assignedAt   DateTime   @default(now())
+
+  @@unique([customRoleId, userId])
+  @@index([userId])
+}
+
+// ---------- Outbound webhooks ----------
+
+/// Tenant-configured outbound webhook endpoint. Events are signed with
+/// HMAC-SHA256 using the endpoint secret. Retries with exponential backoff
+/// and a dead-letter queue. Used by enterprise API consumers to receive
+/// REST events instead of polling.
+model WebhookEndpoint {
+  id         String            @id @default(uuid())
+  hotelId    String
+  hotel      Hotel             @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  url        String
+  secret     String // HMAC secret (encrypted at rest in production)
+  events     String // JSON array of event types ("order.placed", "bill.paid", etc.)
+  active     Boolean           @default(true)
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+  deliveries WebhookDelivery[]
+
+  @@index([hotelId, active])
+}
+
+/// Outbound webhook delivery with HMAC signature, attempt counter, status
+/// and last response. Failed deliveries retried with backoff until success
+/// or dead-letter (status=DEAD). Replay tools allow manual re-delivery.
+model WebhookDelivery {
+  id              String          @id @default(uuid())
+  endpointId      String
+  endpoint        WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  eventId         String // stable, guess-resistant
+  eventType       String
+  payload         String // JSON
+  signature       String // HMAC-SHA256 hex
+  attempt         Int             @default(0)
+  status          String          @default("PENDING") // PENDING | DELIVERED | FAILED | DEAD
+  responseStatus  Int?
+  responseSnippet String?
+  nextRetryAt     DateTime?
+  deliveredAt     DateTime?
+  createdAt       DateTime        @default(now())
+
+  @@index([endpointId, status])
+  @@index([nextRetryAt])
+}
+
+// ---------- A/B experiments ----------
+
+/// A/B feature allocation with stable per-user assignment. Not merely
+/// boolean flags: cohorts are deterministic (hash of experimentId + userId),
+/// measurement tracks per-arm metrics, and an emergency kill switch can
+/// disable the experiment immediately. Feature-flag integration through
+/// the existing GlobalFeatureFlag table for cross-cutting.
+model ABExperiment {
+  id              String         @id @default(uuid())
+  key             String         @unique
+  name            String
+  description     String?
+  variants        String // JSON array of variant keys ["control","treatment"]
+  weights         String // JSON array of weights summing to 1
+  active          Boolean        @default(false)
+  startedAt       DateTime?
+  endedAt         DateTime?
+  killSwitch      Boolean        @default(false)
+  createdByUserId String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  assignments     ABAssignment[]
+
+  @@index([active])
+}
+
+/// Stable per-user assignment to a variant. The hash of (experimentId, userId)
+/// maps to a variant deterministically; the same user always sees the same
+/// variant across sessions and devices. Reassignment only on configuration
+/// change (variant count/weights).
+model ABAssignment {
+  id           String       @id @default(uuid())
+  experimentId String
+  experiment   ABExperiment @relation(fields: [experimentId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  variant      String
+  assignedAt   DateTime     @default(now())
+
+  @@unique([experimentId, userId])
+  @@index([experimentId, variant])
+}
+
+// ---------- Privacy / data subject requests ----------
+
+/// Tenant hard-delete / privacy request flow. Owner authorization required,
+/// retention/legal checks enforced, dependencies/provider/storage cleanup
+/// performed, deletion audit recorded with minimal non-personal evidence.
+/// Independent legal review required; no blanket DPDP/GDPR certification.
+model PrivacyRequest {
+  id                 String    @id @default(uuid())
+  hotelId            String
+  hotel              Hotel     @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  type               String // EXPORT | DELETE | RECTIFY
+  status             String    @default("PENDING") // PENDING | APPROVED | IN_PROGRESS | COMPLETED | REJECTED
+  requestedBy        String?
+  approvedBy         String?
+  legalReviewBy      String?
+  retentionExpiresAt DateTime? // legal hold deadline
+  completedAt        DateTime?
+  rejectionReason    String?
+  auditSummary       String? // non-personal summary of what was deleted
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@index([hotelId, status])
+}
+
+// ---------- SaaS finance: subscription mandates & refunds ----------
+
+/// Recurring payment mandate (Razorpay mandate / Stripe mandate). Customer
+/// authorization captured once; subsequent charges reference this mandate.
+/// Cancellation/pause/resume handled; provider-supported failed-charge retry
+/// and dunning. No auto-charge without a valid mandate.
+model SubscriptionMandate {
+  id                String    @id @default(uuid())
+  hotelId           String
+  hotel             Hotel     @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  provider          String // razorpay | stripe
+  providerMandateId String    @unique
+  status            String    @default("ACTIVE") // ACTIVE | PAUSED | CANCELLED | FAILED
+  maxAmountMinor    Int?
+  currency          String    @default("INR")
+  startedAt         DateTime  @default(now())
+  pausedAt          DateTime?
+  cancelledAt       DateTime?
+  failureReason     String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([hotelId, status])
+}
+
+/// Gateway-triggered subscription refund workflow with provider refund state
+/// and idempotency. Separate from restaurant POS refunds (Phase 14) — these
+/// are SaaS billing refunds only. Manual refunds labelled MANUAL, never
+/// reported as gateway-verified.
+model SubscriptionRefund {
+  id               String   @id @default(uuid())
+  hotelId          String
+  hotel            Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  paymentId        String? // link to SaaS Payment row
+  providerRefundId String?  @unique
+  amountMinor      Int
+  currency         String   @default("INR")
+  status           String   @default("PENDING") // PENDING | COMPLETED | FAILED | MANUAL
+  reason           String?
+  failureReason    String? // provider-side failure description (when status=FAILED)
+  initiatedBy      String?
+  idempotencyKey   String?  @unique
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([hotelId, status])
+}
+
+// ---------- Currency & benchmarking ----------
+
+/// Dated currency conversion rate. Same-currency totals only; mixed-currency
+/// aggregation prohibited. Historical invoice currency immutable (snapshot
+/// at billing). Conversions use dated rates only when actually needed.
+model CurrencyRate {
+  id        String   @id @default(uuid())
+  base      String // INR
+  quote     String // USD
+  rate      Float // 1 base = rate quote
+  datedAt   DateTime
+  source    String? // source label
+  createdAt DateTime @default(now())
+
+  @@unique([base, quote, datedAt])
+  @@index([base, quote])
+}
+
+/// Competitor benchmark record from licensed/public/authorized sources.
+/// Source/date/coverage/confidence disclosed. No neighbourhood averages
+/// without representative data; insufficient data shown explicitly. No
+/// competitor scraping or fabricated metrics.
+model CompetitorBenchmark {
+  id           String   @id @default(uuid())
+  hotelId      String
+  hotel        Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  source       String // PUBLIC_LICENSED | OWNER_REPORTED | PARTNER_API
+  metricKey    String // AVG_ORDER_VALUE | RATING | OCCUPANCY | etc.
+  metricValue  Float
+  confidence   String   @default("MEDIUM") // LOW | MEDIUM | HIGH
+  coverageNote String? // sample size / coverage disclosure
+  observedAt   DateTime
+  createdAt    DateTime @default(now())
+
+  @@index([hotelId, metricKey])
+}
+
+// ---------- Hardening: secret rotation audit ----------
+
+/// Secret rotation event log. End-to-end secret rotation including MFA
+/// recovery, key strategy, encrypted credentials/backups and expired tokens.
+/// Captures the before/after state without storing the secret material.
+model SecretRotation {
+  id          String   @id @default(uuid())
+  secretKey   String // AUTH_SECRET | INTEGRATION_ENCRYPTION_KEY | ...
+  reason      String // SCHEDULED | COMPROMISE | KEY_EXPIRY | MANUAL
+  performedBy String?
+  beforeHash  String? // sha256 of old value (never the value)
+  afterHash   String?
+  rotatedAt   DateTime @default(now())
+  notes       String?
+
+  @@index([secretKey])
+  @@index([rotatedAt])
+}
+
+// =====================
+// Phase 18 — Advanced AI & Innovation
+// =====================
+// GOVERNANCE RULES (see src/lib/ai/governance.ts):
+//  - Every AI feature is OFF by default; the owner enables it per tenant.
+//  - modelProvider NONE means NO external model calls are ever made — the
+//    engines are transparent rule-based implementations, honestly labelled.
+//  - Every AI decision/action appends an AIInteractionLog row (audit).
+//  - AI never overrides finance, tax, consent or permission decisions; it can
+//    only read tenant-scoped catalog data and place orders through the SAME
+//    server-validated createOrder pipeline as the web cart.
+
+/// Per-tenant AI feature flags & budget caps.
+model AISettings {
+  id                     String   @id @default(uuid())
+  hotelId                String   @unique
+  hotel                  Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  chatbotEnabled         Boolean  @default(false)
+  // Optional service window JSON {"mon":[{"open":"11:00","close":"23:00"}]} —
+  // null = 24x7. Outside the window the bot replies with the human-handoff
+  // message and does NOT take orders.
+  chatbotServiceHours    String?
+  recommendationsEnabled Boolean  @default(false)
+  forecastingEnabled     Boolean  @default(false)
+  // Voice input runs client-side (Web Speech API); this flag only gates the UI.
+  voiceEnabled           Boolean  @default(false)
+  walletEnabled          Boolean  @default(false)
+  sustainabilityEnabled  Boolean  @default(false)
+  // NONE = rule-based only (no external model calls — default & honest).
+  modelProvider          String   @default("NONE")
+  dailyRequestCap        Int      @default(200)
+  monthlyRequestCap      Int      @default(3000)
+  handoffPhone           String?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@index([hotelId])
+}
+
+/// WhatsApp ordering chatbot conversation state (one per customer phone).
+/// The cart stored here is ALWAYS server-priced from the live catalog before
+/// every reply — a stale/edited cartJson can never produce a wrong total.
+model AIConversation {
+  id             String    @id @default(uuid())
+  hotelId        String
+  hotel          Hotel     @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  phone          String
+  customerId     String?
+  customer       Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  // IDLE | BROWSING | CART | CONFIRM | ORDERED | HANDOFF | OPTOUT
+  state          String    @default("IDLE")
+  // Server-priced cart snapshot: [{menuItemId,name,qty,unitPriceMinor,optionGroups:[{id,name,options:[{id,name,priceDeltaMinor}]}],lineTotalMinor}]
+  cartJson       String?
+  lastOrderId    String?
+  // Deduplication: inbound provider message id (replayed webhooks never
+  // double-process a message).
+  lastInboundId  String?   @unique
+  messageCount   Int       @default(0)
+  lastActivityAt DateTime  @default(now())
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([hotelId, phone])
+  @@index([hotelId, state])
+  @@index([lastActivityAt])
+}
+
+/// AI governance audit — every AI decision, refusal, fallback and send.
+/// Stores NO raw customer message bodies and NO secrets; only intent/status/
+/// reason codes and non-sensitive counters.
+model AIInteractionLog {
+  id          String   @id @default(uuid())
+  hotelId     String
+  hotel       Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  kind        String   // CHATBOT | RECOMMENDATION | FORECAST | WALLET | VOICE
+  subtype     String?  // intent name / rule id / action
+  channel     String?  // WHATSAPP | WEB | VOICE
+  status      String   // OK | REFUSED | BLOCKED_BUDGET | BLOCKED_DISABLED | BLOCKED_CONSENT | HANDOFF | NOT_ENOUGH_DATA | ERROR
+  reason      String?  // short refusal/fallback reason code (never raw input)
+  customerId  String?
+  metaJson    String?  // JSON: rule ids, latency ms, counters — never prompts/secrets
+  createdAt   DateTime @default(now())
+
+  @@index([hotelId, createdAt])
+  @@index([hotelId, kind, status])
+}
+
+/// Demand forecast per item per business day — ADVISORY ONLY.
+/// Never consumed automatically; no automatic purchase orders are created.
+model DemandForecast {
+  id           String    @id @default(uuid())
+  hotelId      String
+  hotel        Hotel     @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  menuItemId   String?
+  menuItem     MenuItem? @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  businessDate String // YYYY-MM-DD in the tenant IANA timezone
+  dow          Int // 0=Sun … 6=Sat
+  forecastQty  Float
+  lowerBound   Float
+  upperBound   Float
+  method       String    @default("WEEKDAY_MOVING_AVG")
+  dataPoints   Int       @default(0)
+  sufficient   Boolean   @default(false) // false → NOT_ENOUGH_DATA (display honestly)
+  mae          Float? // backtest MAE for this item (null = not backtested)
+  naiveMae     Float? // naive baseline (same-item mean) MAE for skill comparison
+  computedAt   DateTime  @default(now())
+
+  @@unique([hotelId, menuItemId, businessDate])
+  @@index([hotelId, businessDate])
+}
+
+/// Rule-based offer recommendation requiring explicit human approval before
+/// any send. basis is always RULE_BASED unless a real evaluated model exists;
+/// score is a transparent rule score — never a fabricated conversion chance.
+model AIRecommendation {
+  id               String    @id @default(uuid())
+  hotelId          String
+  hotel            Hotel     @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  customerId       String?
+  customer         Customer? @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  couponId         String?
+  coupon           Coupon?   @relation(fields: [couponId], references: [id], onDelete: SetNull)
+  basis            String    @default("RULE_BASED")
+  ruleId           String // WINBACK_30D | BIRTHDAY_7D | REPEAT_VISIT_N | BIG_SPENDER_LAPSE | NEW_CUSTOMER_WELCOME
+  reasonCode       String // human-readable reason shown in the approval UI
+  score            Float?
+  // PENDING | APPROVED | SENT | DISMISSED | EXPIRED
+  status           String    @default("PENDING")
+  channel          String    @default("WHATSAPP")
+  // Occurrence dedup: one recommendation per customer/rule/window-key.
+  occurrenceKey    String
+  approvedByUserId String?
+  approvedAt       DateTime?
+  sentAt           DateTime?
+  errorMessage     String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@unique([hotelId, customerId, ruleId, occurrenceKey])
+  @@index([hotelId, status])
+  @@index([hotelId, createdAt])
+}
+
+/// Digital loyalty wallet pass (Apple Wallet / Google Wallet pass RECORD).
+/// A pass is a LOYALTY CREDENTIAL — never a stored-money payment instrument.
+/// Distribution/signing through the real Apple/Google provider flow requires
+/// credentials this deployment may not have; the API reports that state
+/// honestly (PROVIDER_BLOCKED) instead of shipping a fake PNG "integration".
+model WalletPass {
+  id            String   @id @default(uuid())
+  hotelId       String
+  hotel         Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  customerId    String
+  customer      Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  serialNumber  String   @unique
+  platform      String   @default("GENERIC") // APPLE | GOOGLE | GENERIC
+  status        String   @default("ACTIVE") // ACTIVE | REVOKED
+  pointsAtIssue Int      @default(0)
+  // HMAC-signed update token for the pass update endpoint (revocable).
+  updateToken   String   @unique
+  issuedAt      DateTime @default(now())
+  revokedAt     DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([hotelId, customerId, platform])
+  @@index([hotelId, status])
+}
+
+/// Optional sustainability badge — SELF-REPORTED by the owner, labelled as
+/// such on the public menu. No invented certification or precise footprint.
+model SustainabilityBadge {
+  id          String   @id @default(uuid())
+  hotelId     String
+  hotel       Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  label       String
+  description String?
+  source      String   @default("SELF_REPORTED")
+  methodRef   String? // owner-supplied method/source note shown alongside
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([hotelId, active])
+}

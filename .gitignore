@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Environment & secrets — NEVER commit real env files
+.env
+.env.*
+!.env.example
+!.env.production.example
+!.env.test.example
+.auth-secret.dev
+.dev-mfa-secret
+
+# Databases (demo/dev data is reproducible via `bun run seed`)
+db/*.db
+db/*.db-journal
+*.sqlite
+*.sqlite3
+
+# Runtime artifacts
+*.tsbuildinfo
+coverage/
+out/
+build/
+backups/
+var/
+*.log
+dev.log
+server.log
+.next/
+next-env.d.ts
+.DS_Store
+worklog.md
+
+# Skills (platform-specific)
+skills/

@@ -1,0 +1,10 @@
+{
+  "name": "RestroLoop Staff",
+  "short_name": "RestroLoop",
+  "description": "Restaurant POS, KDS and floor operations",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#09090b",
+  "theme_color": "#09090b",
+  "icons": [{ "src": "/logo.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

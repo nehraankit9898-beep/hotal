@@ -1,0 +1,242 @@
+import { db } from "@/lib/db";
+import { clientIp } from "@/lib/rate-limit";
+import type { Prisma } from "@prisma/client";
+
+/**
+ * Audit logging — Phase 21.
+ * Never stores sensitive data: passwords, API keys, session tokens, OAuth
+ * tokens and webhook secrets are scrubbed from metadata before persisting.
+ * Never throws: audit failure must not break the main business flow.
+ *
+ * `tx` (optional): write the audit row inside a caller-managed transaction so
+ * the record commits/rolls back WITH the business writes it describes (used
+ * by the payment-confirmation outbox path). Without it the global client is
+ * used, exactly as before.
+ */
+
+/** Keys whose values are stripped wherever they appear in metadata. */
+const SENSITIVE_METADATA_KEYS =
+  /^(password|newpassword|currentpassword|passhash|passwordhash|secret|client_?secret|api_?key|apikey|token|access_?token|refresh_?token|session_?token|webhook_?secret|authorization|credentials|credential|otp|mfa_?secret)$/i;
+
+function scrub(value: unknown, depth = 0): unknown {
+  if (depth > 4) return "[deep]";
+  if (Array.isArray(value)) return value.slice(0, 20).map((v) => scrub(v, depth + 1));
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (SENSITIVE_METADATA_KEYS.test(k)) {
+        out[k] = "[REDACTED]";
+      } else {
+        out[k] = scrub(v, depth + 1);
+      }
+    }
+    return out;
+  }
+  if (typeof value === "string" && value.length > 500) return value.slice(0, 500) + "…";
+  return value;
+}
+
+export async function logAudit(data: {
+  hotelId?: string | null;
+  userId?: string | null;
+  action: string;
+  entityType?: string;
+  entityId?: string;
+  metadata?: Record<string, unknown>;
+  ipAddress?: string | null;
+  /** Optional request — used to auto-capture the client IP when `ipAddress` is not given. */
+  req?: Request;
+  /** Optional transaction client — the audit row commits with the caller's transaction. */
+  tx?: Prisma.TransactionClient;
+}): Promise<void> {
+  try {
+    let ipAddress = data.ipAddress ?? null;
+    if (ipAddress === null && data.req) {
+      try {
+        ipAddress = clientIp(data.req);
+      } catch {
+        /* best-effort */
+      }
+    }
+    const client = data.tx ?? db;
+    await client.auditLog.create({
+      data: {
+        hotelId: data.hotelId ?? null,
+        userId: data.userId ?? null,
+        action: data.action,
+        entityType: data.entityType ?? null,
+        entityId: data.entityId ?? null,
+        metadata: data.metadata
+          ? JSON.stringify(scrub(data.metadata) as Record<string, unknown>)
+          : null,
+        ipAddress,
+      },
+    });
+  } catch (err) {
+    console.error("[audit] failed to write audit log:", err instanceof Error ? err.message : err);
+  }
+}
+
+export const AUDIT_ACTIONS = {
+  LOGIN: "LOGIN",
+  LOGIN_FAILED: "LOGIN_FAILED",
+  LOGOUT: "LOGOUT",
+  ACCOUNT_LOCKED: "ACCOUNT_LOCKED",
+  HOTEL_CREATED: "HOTEL_CREATED",
+  HOTEL_SUSPENDED: "HOTEL_SUSPENDED",
+  HOTEL_ACTIVATED: "HOTEL_ACTIVATED",
+  OWNER_INVITED: "OWNER_INVITED",
+  OWNER_ACTIVATED: "OWNER_ACTIVATED",
+  SUPER_ADMIN_BOOTSTRAPPED: "SUPER_ADMIN_BOOTSTRAPPED",
+  CUSTOMER_CREATED: "CUSTOMER_CREATED",
+  CUSTOMER_UPDATED: "CUSTOMER_UPDATED",
+  CUSTOMER_DEACTIVATED: "CUSTOMER_DEACTIVATED",
+  CUSTOMER_REACTIVATED: "CUSTOMER_REACTIVATED",
+  CONSENT_GRANTED: "CONSENT_GRANTED",
+  CONSENT_REVOKED: "CONSENT_REVOKED",
+  OPT_OUT: "OPT_OUT",
+  VISIT_CREATED: "VISIT_CREATED",
+  VISIT_UPDATED: "VISIT_UPDATED",
+  VISIT_DELETED: "VISIT_DELETED",
+  CUSTOMERS_IMPORTED: "CUSTOMERS_IMPORTED",
+  VISITS_IMPORTED: "VISITS_IMPORTED",
+  PROFILE_UPDATED: "PROFILE_UPDATED",
+  PASSWORD_CHANGED: "PASSWORD_CHANGED",
+  MFA_CHANGED: "MFA_CHANGED",
+  ROLE_CHANGED: "ROLE_CHANGED",
+  STAFF_CREATED: "STAFF_CREATED",
+  STAFF_DELETED: "STAFF_DELETED",
+  // Phase 13 — staff lifecycle
+  STAFF_INVITED: "STAFF_INVITED",
+  STAFF_ROLE_CHANGED: "STAFF_ROLE_CHANGED",
+  STAFF_DEACTIVATED: "STAFF_DEACTIVATED",
+  STAFF_SESSIONS_REVOKED: "STAFF_SESSIONS_REVOKED",
+  STAFF_INVITE_RESET: "STAFF_INVITE_RESET",
+  // Phase 2
+  CAMPAIGN_CREATED: "CAMPAIGN_CREATED",
+  CAMPAIGN_UPDATED: "CAMPAIGN_UPDATED",
+  CAMPAIGN_SENT: "CAMPAIGN_SENT",
+  CAMPAIGN_ARCHIVED: "CAMPAIGN_ARCHIVED",
+  TEST_MESSAGE_SENT: "TEST_MESSAGE_SENT",
+  SEGMENT_CREATED: "SEGMENT_CREATED",
+  SEGMENT_UPDATED: "SEGMENT_UPDATED",
+  SEGMENT_DELETED: "SEGMENT_DELETED",
+  SEGMENT_MEMBER_ADDED: "SEGMENT_MEMBER_ADDED",
+  SEGMENT_MEMBER_REMOVED: "SEGMENT_MEMBER_REMOVED",
+  SEGMENTS_REFRESHED: "SEGMENTS_REFRESHED",
+  FOLLOWUP_SETTINGS_UPDATED: "FOLLOWUP_SETTINGS_UPDATED",
+  FOLLOWUP_ENGINE_RUN: "FOLLOWUP_ENGINE_RUN",
+  BOOKING_ATTRIBUTED: "BOOKING_ATTRIBUTED",
+  TRACKING_EVENT: "TRACKING_EVENT",
+  // Phase 3
+  COUPON_ISSUED: "COUPON_ISSUED",
+  COUPON_REDEEMED: "COUPON_REDEEMED",
+  // Phase 4
+  AUTOMATION_CREATED: "AUTOMATION_CREATED",
+  AUTOMATION_UPDATED: "AUTOMATION_UPDATED",
+  AUTOMATION_DELETED: "AUTOMATION_DELETED",
+  AUTOMATION_RUN: "AUTOMATION_RUN",
+  LEAD_EVENT_RECORDED: "LEAD_EVENT_RECORDED",
+  // Phase 6
+  FEATURE_TOGGLED: "FEATURE_TOGGLED",
+  INTEGRATION_CONNECTED: "INTEGRATION_CONNECTED",
+  INTEGRATION_UPDATED: "INTEGRATION_UPDATED",
+  INTEGRATION_DELETED: "INTEGRATION_DELETED",
+  SUPPORT_ACCESS_REQUESTED: "SUPPORT_ACCESS_REQUESTED",
+  CSRF_BLOCKED: "CSRF_BLOCKED",
+  WEBHOOK_REJECTED: "WEBHOOK_REJECTED",
+  // Phase 6.3 — restaurant growth
+  LOYALTY_SETTINGS_UPDATED: "LOYALTY_SETTINGS_UPDATED",
+  LOYALTY_JOINED: "LOYALTY_JOINED",
+  LOYALTY_POINTS_ADJUSTED: "LOYALTY_POINTS_ADJUSTED",
+  LOYALTY_REWARD_REDEEMED: "LOYALTY_REWARD_REDEEMED",
+  QR_CREATED: "QR_CREATED",
+  QR_UPDATED: "QR_UPDATED",
+  QR_DELETED: "QR_DELETED",
+  FEEDBACK_RECEIVED: "FEEDBACK_RECEIVED",
+  TEMPLATE_CREATED: "TEMPLATE_CREATED",
+  TEMPLATE_UPDATED: "TEMPLATE_UPDATED",
+  TEMPLATE_DELETED: "TEMPLATE_DELETED",
+  RESTAURANT_SETTINGS_UPDATED: "RESTAURANT_SETTINGS_UPDATED",
+  CUSTOMER_JOINED_QR: "CUSTOMER_JOINED_QR",
+  DATA_EXPORT: "DATA_EXPORT",
+  // Phase 6.4 — loyalty ledger integrity
+  LOYALTY_VISIT_REVERSED: "LOYALTY_VISIT_REVERSED",
+  LOYALTY_VISIT_ADJUSTED: "LOYALTY_VISIT_ADJUSTED",
+  LOYALTY_RECONCILED: "LOYALTY_RECONCILED",
+  RESTAURANT_VISIT_UPDATED: "RESTAURANT_VISIT_UPDATED",
+  RESTAURANT_VISIT_DELETED: "RESTAURANT_VISIT_DELETED",
+  CAMPAIGN_RETRIED: "CAMPAIGN_RETRIED",
+  FEEDBACK_RATE_LIMITED: "FEEDBACK_RATE_LIMITED",
+  // Phase 7 — email verification & password reset
+  EMAIL_VERIFICATION_SENT: "EMAIL_VERIFICATION_SENT",
+  EMAIL_VERIFIED: "EMAIL_VERIFIED",
+  PASSWORD_RESET_REQUESTED: "PASSWORD_RESET_REQUESTED",
+  PASSWORD_RESET_COMPLETED: "PASSWORD_RESET_COMPLETED",
+  // Phase 7 — background jobs
+  CAMPAIGN_QUEUED: "CAMPAIGN_QUEUED",
+  EXPORT_QUEUED: "EXPORT_QUEUED",
+  // Phase 11 — developer API keys
+  API_KEY_CREATED: "API_KEY_CREATED",
+  API_KEY_REVOKED: "API_KEY_REVOKED",
+  SUSPICIOUS_ACTIVITY: "SUSPICIOUS_ACTIVITY",
+  // Phase 9 — platform audit actions
+  SESSION_REVOKED: "SESSION_REVOKED",
+  FORCE_LOGOUT: "FORCE_LOGOUT",
+  USER_SUSPENDED: "USER_SUSPENDED",
+  SUPPORT_SESSION_ENDED: "SUPPORT_SESSION_ENDED",
+  // Phase 10 — SaaS lifecycle audit actions
+  PLAN_CREATED: "PLAN_CREATED",
+  PLAN_UPDATED: "PLAN_UPDATED",
+  PLAN_ARCHIVED: "PLAN_ARCHIVED",
+  PRICE_CHANGED: "PRICE_CHANGED",
+  TRIAL_STARTED: "TRIAL_STARTED",
+  TRIAL_EXTENDED: "TRIAL_EXTENDED",
+  TRIAL_SHORTENED: "TRIAL_SHORTENED",
+  TRIAL_CANCELLED: "TRIAL_CANCELLED",
+  TRIAL_REACTIVATED: "TRIAL_REACTIVATED",
+  TRIAL_CONVERTED: "TRIAL_CONVERTED",
+  TRIAL_EXPIRED: "TRIAL_EXPIRED",
+  SUBSCRIPTION_CHANGED: "SUBSCRIPTION_CHANGED",
+  SUBSCRIPTION_RENEWED: "SUBSCRIPTION_RENEWED",
+  SUBSCRIPTION_CANCELLED: "SUBSCRIPTION_CANCELLED",
+  SUBSCRIPTION_SUSPENDED: "SUBSCRIPTION_SUSPENDED",
+  SUBSCRIPTION_REACTIVATED: "SUBSCRIPTION_REACTIVATED",
+  SUBSCRIPTION_PAUSED: "SUBSCRIPTION_PAUSED",
+  SUBSCRIPTION_RESUMED: "SUBSCRIPTION_RESUMED",
+  SUBSCRIPTION_EXPIRED: "SUBSCRIPTION_EXPIRED",
+  SUBSCRIPTION_GRACE_ENTERED: "SUBSCRIPTION_GRACE_ENTERED",
+  BILLING_COUPON_CREATED: "BILLING_COUPON_CREATED",
+  BILLING_COUPON_UPDATED: "BILLING_COUPON_UPDATED",
+  BILLING_COUPON_DELETED: "BILLING_COUPON_DELETED",
+  BILLING_COUPON_REDEEMED: "BILLING_COUPON_REDEEMED",
+  CHECKOUT_CREATED: "CHECKOUT_CREATED",
+  PAYMENT_RECORDED: "PAYMENT_RECORDED",
+  PAYMENT_FAILED: "PAYMENT_FAILED",
+  PAYMENT_REFUNDED: "PAYMENT_REFUNDED",
+  WEBHOOK_RECEIVED: "WEBHOOK_RECEIVED",
+  BILLING_PROVIDER_UPDATED: "BILLING_PROVIDER_UPDATED",
+  GLOBAL_FEATURE_TOGGLED: "GLOBAL_FEATURE_TOGGLED",
+  GLOBAL_FEATURE_SCHEDULED: "GLOBAL_FEATURE_SCHEDULED",
+  PLATFORM_SETTING_CHANGED: "PLATFORM_SETTING_CHANGED",
+  MAINTENANCE_MODE_CHANGED: "MAINTENANCE_MODE_CHANGED",
+  MFA_DISABLED: "MFA_DISABLED",
+  MFA_POLICY_CHANGED: "MFA_POLICY_CHANGED",
+  MFA_CHALLENGE_PASSED: "MFA_CHALLENGE_PASSED",
+  MFA_CHALLENGE_FAILED: "MFA_CHALLENGE_FAILED",
+  BACKUP_TRIGGERED: "BACKUP_TRIGGERED",
+  BACKUP_COMPLETED: "BACKUP_COMPLETED",
+  BACKUP_FAILED: "BACKUP_FAILED",
+  BACKUP_VERIFIED: "BACKUP_VERIFIED",
+  BACKUP_VERIFY_FAILED: "BACKUP_VERIFY_FAILED",
+  IP_BLOCKED: "IP_BLOCKED",
+  IP_UNBLOCKED: "IP_UNBLOCKED",
+  PERMISSION_CHANGED: "PERMISSION_CHANGED",
+  PII_ACCESS: "PII_ACCESS",
+  EXPORT_CREATED: "EXPORT_CREATED",
+  SECURITY_EVENT_REVIEWED: "SECURITY_EVENT_REVIEWED",
+  ANNOUNCEMENT_PUBLISHED: "ANNOUNCEMENT_PUBLISHED",
+  NOTIFICATION_TEMPLATE_UPDATED: "NOTIFICATION_TEMPLATE_UPDATED",
+  USAGE_LIMIT_WARNING: "USAGE_LIMIT_WARNING",
+  USAGE_LIMIT_REACHED: "USAGE_LIMIT_REACHED",
+} as const;

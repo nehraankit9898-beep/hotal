@@ -1,0 +1,27 @@
+# RestroLoop robots.txt
+# Public capability URLs (/menu/, /r/) are unguessable per-table/per-tenant
+# identifiers — they are access tokens, not SEO landing pages. Crawling them
+# only leaks capability URLs into search caches.
+User-agent: Googlebot
+Allow: /
+Disallow: /menu/
+Disallow: /r/
+Disallow: /api/
+
+User-agent: Bingbot
+Allow: /
+Disallow: /menu/
+Disallow: /r/
+Disallow: /api/
+
+User-agent: Twitterbot
+Allow: /
+
+User-agent: facebookexternalhit
+Allow: /
+
+User-agent: *
+Allow: /
+Disallow: /menu/
+Disallow: /r/
+Disallow: /api/

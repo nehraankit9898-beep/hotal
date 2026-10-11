@@ -1,0 +1,16 @@
+node_modules
+.next
+.git
+.env
+.env.*
+!.env.example
+!.env.production.example
+!.env.test.example
+db/*.db
+db/*.db-journal
+var
+docs
+*.log
+README.md
+Dockerfile
+docker-compose*.yml

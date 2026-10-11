@@ -1,0 +1,59 @@
+# StayLoop — production reverse proxy (TLS termination for the public domain).
+#
+# The public domain and ACME account email are injected as environment
+# variables by docker-compose.prod.yml ($DOMAIN / $ACME_EMAIL — set them in
+# .env). Caddy automatically obtains and renews a Let's Encrypt certificate
+# for the domain.
+#
+# SECURITY (audit fix 6): the previous bundled Caddyfile listened on :81 and
+# allowed an XTransformPort query parameter to select an arbitrary localhost
+# upstream port — an open proxy. That mechanism is REMOVED. This file forwards
+# to exactly one upstream: the `web` service on port 3000, inside the private
+# compose network. Nothing else is reachable.
+#
+# The app sets its own security headers (CSP, HSTS, frame-ancestors — see
+# next.config.ts); Caddy adds transport security and forwards the standard
+# proxy headers the app's CSRF/cookie logic relies on (Host,
+# X-Forwarded-Proto, X-Forwarded-For). Forwarded headers are only accepted
+# from THIS proxy because web is not reachable directly (port 3000 is bound
+# to 127.0.0.1 on the host and to the internal compose network only).
+
+{
+        # ACME account contact (Let's Encrypt expiry/notice emails).
+        email {$ACME_EMAIL}
+        # FIRST-TIME TESTING (optional): avoid Let's Encrypt rate limits while you
+        # verify DNS by uncommenting the staging CA line below. Comment it back out
+        # and restart caddy to get a REAL certificate:
+        # acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+{$DOMAIN} {
+        encode zstd gzip
+
+        handle {
+                reverse_proxy web:3000 {
+                        # Standard proxy headers — the app's CSRF host validation and
+                        # Secure-cookie detection consume these.
+                        header_up Host {host}
+                        header_up X-Forwarded-For {remote_host}
+                        header_up X-Forwarded-Proto {scheme}
+                        header_up X-Real-IP {remote_host}
+                }
+        }
+
+        header {
+                # Defense in depth on the proxy edge (the app adds its own CSP/HSTS).
+                Strict-Transport-Security "max-age=63072000; includeSubDomains"
+                X-Content-Type-Options "nosniff"
+                Referrer-Policy "strict-origin-when-cross-origin"
+                Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+                -X-Frame-Options
+                # Timeout idle keep-alives.
+                -Server
+        }
+
+        log {
+                output stdout
+                format console
+        }
+}
