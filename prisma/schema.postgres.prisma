@@ -211,6 +211,9 @@ model User {
   // Phase 10 — TOTP MFA (RFC 6238) + single-use hashed backup codes
   mfaBackupCodes      String? // JSON array of sha256-hashed backup codes
   mfaEnforcedAt       DateTime? // when MFA policy began applying to this user
+  // SECURITY FIX (TOTP replay): last accepted TOTP time-step; a code whose step
+  // is <= this value is rejected, so one code can only be used once.
+  mfaLastUsedStep     Int?
   lastLoginAt         DateTime?
   lastLoginIp         String?
   failedLoginAttempts Int        @default(0)
@@ -370,6 +373,7 @@ model AuthAttempt {
   createdAt DateTime @default(now())
 
   @@index([email, createdAt])
+  @@index([ipAddress, createdAt])
 }
 
 // =====================

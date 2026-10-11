@@ -3,7 +3,7 @@ import { resolvePublicMenu } from "@/lib/menu";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { requestIp } from "@/lib/login-security";
 import { loadVoiceCatalog, parseVoiceTranscript } from "@/lib/ai/voice";
-import { getAISettings, logAIInteraction } from "@/lib/ai/governance";
+import { logAIInteraction } from "@/lib/ai/governance";
 import { db } from "@/lib/db";
 
 /**
@@ -37,8 +37,6 @@ export async function POST(req: Request, ctx: { params: Promise<{ code: string }
     if (!settings?.voiceEnabled) {
       return jsonError("Voice ordering is not available here.", 403, "VOICE_DISABLED");
     }
-    const aiSettings = await getAISettings(menu.restaurant.id);
-    void aiSettings;
 
     let body: { transcript?: unknown };
     try {

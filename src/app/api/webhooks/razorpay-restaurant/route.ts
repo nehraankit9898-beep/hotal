@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from "crypto";
 import { db } from "@/lib/db";
 import { jsonError } from "@/lib/api-helpers";
-import { restaurantGatewayCredentials, recordGatewayCapture } from "@/lib/billing";
+import { recordGatewayCapture } from "@/lib/billing";
 import { logAudit } from "@/lib/audit";
 
 /**
@@ -17,6 +17,10 @@ import { logAudit } from "@/lib/audit";
  *  - Amount/currency binding: only `payment.captured` events for our own
  *    order ids allocate money, and only after the amount matches the intent.
  */
+
+function isUniqueViolation(err: unknown): boolean {
+  return typeof err === "object" && err !== null && "code" in err && (err as { code?: string }).code === "P2002";
+}
 
 export async function POST(req: Request) {
   const raw = await req.text();
@@ -40,7 +44,6 @@ export async function POST(req: Request) {
 
   const hotelIdFromNotes = payload.payload?.payment?.entity?.notes?.hotelId;
   if (hotelIdFromNotes) {
-    const creds = await restaurantGatewayCredentials(hotelIdFromNotes);
     // Tenant webhook secrets live on the integration row.
     const integration = await db.integration.findFirst({
       where: { hotelId: hotelIdFromNotes, type: "RAZORPAY", enabled: true },
@@ -55,7 +58,6 @@ export async function POST(req: Request) {
       } catch {
         /* decrypt failure falls through to env candidates */
       }
-      void creds;
     }
   }
 
@@ -90,9 +92,15 @@ export async function POST(req: Request) {
         status: "PROCESSED",
       },
     });
-  } catch {
-    // Unique violation = replay. Answer 200; never re-allocate.
-    return Response.json({ ok: true, duplicate: true });
+  } catch (err) {
+    // SECURITY/CORRECTNESS FIX: only a UNIQUE violation means "replay". Any other
+    // DB error (timeout, connection loss) used to be answered 200 "duplicate",
+    // so Razorpay never retried and a captured payment was silently dropped.
+    // Other errors now surface as 500 so the provider re-delivers.
+    if (isUniqueViolation(err)) {
+      return Response.json({ ok: true, duplicate: true });
+    }
+    throw err;
   }
 
   if (payload.event !== "payment.captured") {

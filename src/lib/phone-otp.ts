@@ -1,5 +1,6 @@
 import { createHash, randomInt, timingSafeEqual } from "crypto";
 import { db } from "@/lib/db";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 /**
  * AUDIT FIX (F14) — phone-ownership OTP for public (anonymous) flows.
@@ -39,6 +40,12 @@ import { db } from "@/lib/db";
 export const OTP_TTL_MS = 5 * 60 * 1000;
 export const OTP_MAX_ATTEMPTS = 5;
 export const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
+/**
+ * SECURITY FIX (attempt reset): after OTP_MAX_ATTEMPTS wrong codes the phone is
+ * locked for this long — re-issuing is refused until then. Before, every
+ * re-issue reset `attempts` to 0, so a guesser could try 5 codes per minute.
+ */
+export const OTP_LOCKOUT_MS = 60 * 60 * 1000;
 
 export type OtpIssueResult =
   | {
@@ -59,6 +66,9 @@ function isProduction(): boolean {
 }
 
 /** Issue (or re-issue) an OTP for (hotelId, phone). One live row per triple. */
+/** Max codes issued per hotel+phone per hour (SMS cost / pumping guard). */
+export const OTP_ISSUE_LIMIT_PER_HOUR = 5;
+
 export async function issuePhoneOtp(params: {
   hotelId: string;
   phone: string;
@@ -69,12 +79,30 @@ export async function issuePhoneOtp(params: {
   const purpose = params.purpose ?? "PUBLIC_JOIN";
   const now = new Date();
 
-  // RECHECK FIX (E): resend cooldown — the row (if any) records when the
-  // current code was issued via expiresAt − TTL. A resend inside the
-  // cooldown neither resets the code nor burns another SMS.
   const existing = await db.phoneOtp.findUnique({
     where: { hotelId_phone_purpose: { hotelId: params.hotelId, phone: params.phone, purpose } },
   });
+  // SECURITY FIX: a live row whose attempt ceiling was reached stays locked.
+  // Attempts carry over across re-issues while the row is live, so re-issuing
+  // cannot reset the guess budget.
+  const liveRow =
+    existing !== null &&
+    existing.consumedAt === null &&
+    existing.expiresAt.getTime() > now.getTime();
+  if (liveRow && existing && existing.attempts >= OTP_MAX_ATTEMPTS) {
+    const retryAfterSeconds = Math.max(
+      1,
+      Math.ceil((existing.expiresAt.getTime() - now.getTime()) / 1000),
+    );
+    return {
+      ok: false,
+      error: "Too many incorrect codes for this number. Please try again later.",
+      cooldownSeconds: retryAfterSeconds,
+    };
+  }
+  // RECHECK FIX (E): resend cooldown — the row (if any) records when the
+  // current code was issued via expiresAt − TTL. A resend inside the
+  // cooldown neither resets the code nor burns another SMS.
   if (existing && existing.consumedAt === null && existing.expiresAt.getTime() > now.getTime()) {
     const issuedAt = existing.expiresAt.getTime() - OTP_TTL_MS;
     const elapsed = now.getTime() - issuedAt;
@@ -88,6 +116,23 @@ export async function issuePhoneOtp(params: {
     }
   }
 
+  // SECURITY FIX (S4): hourly cap per hotel+number on codes actually issued. The
+  // per-IP limiter alone lets one number be texted from many IPs (SMS cost abuse).
+  // Placed after the resend cooldown so cooldown-rejected calls don't consume it.
+  const issueLimit = await checkRateLimit(
+    `otp-issue:${params.hotelId}:${params.phone}`,
+    OTP_ISSUE_LIMIT_PER_HOUR,
+    60 * 60 * 1000,
+  );
+  if (!issueLimit.allowed) {
+    return {
+      ok: false,
+      error: "Too many verification codes were requested for this number. Please try again later.",
+      cooldownSeconds: issueLimit.retryAfterSeconds,
+    };
+  }
+
+  const carriedAttempts = liveRow && existing ? existing.attempts : 0;
   const expiresAt = new Date(now.getTime() + OTP_TTL_MS);
   const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
 
@@ -105,7 +150,7 @@ export async function issuePhoneOtp(params: {
     },
     update: {
       codeHash: hashCode(params.phone, code, purpose),
-      attempts: 0,
+      attempts: carriedAttempts,
       consumedAt: null,
       expiresAt,
     },
@@ -214,7 +259,7 @@ export async function verifyPhoneOtp(params: {
     // Guarded attempt increment (recheck fix H): bound to the exact code
     // generation AND the attempt ceiling — a racing burst cannot push
     // attempts past OTP_MAX_ATTEMPTS, and a re-issued code starts fresh.
-    await db.phoneOtp.updateMany({
+    const bumped = await db.phoneOtp.updateMany({
       where: {
         id: row.id,
         codeHash: row.codeHash,
@@ -223,6 +268,13 @@ export async function verifyPhoneOtp(params: {
       },
       data: { attempts: { increment: 1 } },
     });
+    if (bumped.count === 1 && row.attempts + 1 >= OTP_MAX_ATTEMPTS) {
+      // Ceiling reached: keep the row live for the lockout window (see issue).
+      await db.phoneOtp.updateMany({
+        where: { id: row.id, codeHash: row.codeHash, consumedAt: null },
+        data: { expiresAt: new Date(Date.now() + OTP_LOCKOUT_MS) },
+      });
+    }
     return { ok: false, reason: "MISMATCH" };
   }
 

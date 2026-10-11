@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { hashPassword } from "@/lib/auth";
+import { hashPasswordAsync } from "@/lib/auth";
 import { parseWith, activateAccountSchema } from "@/lib/validation";
 import { consumeActivationToken } from "@/lib/super-admin";
 import { logAudit, AUDIT_ACTIONS } from "@/lib/audit";
@@ -117,7 +117,7 @@ export async function POST(req: Request) {
     await db.user.update({
       where: { id: user.id },
       data: {
-        passwordHash: hashPassword(password),
+        passwordHash: await hashPasswordAsync(password),
         status: "ACTIVE",
         mustChangePassword: false,
         tokenVersion: { increment: 1 }, // invalidate anything issued pre-activation

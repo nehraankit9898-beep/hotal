@@ -1,10 +1,13 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import {
-  verifyPassword,
+  needsRehash,
+  dummyPasswordHash,
   createSessionToken,
   SESSION_COOKIE,
   sessionCookieOptions,
+  hashPasswordAsync,
+  verifyPasswordAsync,
 } from "@/lib/auth";
 import { generateCsrfToken, CSRF_COOKIE, csrfCookieOptions } from "@/lib/csrf";
 import { jsonError, serverError } from "@/lib/api-helpers";
@@ -13,6 +16,7 @@ import { logAudit, AUDIT_ACTIONS } from "@/lib/audit";
 import {
   getLockoutStatus,
   isIpThrottled,
+  recordAuthAttempt,
   recordFailedLogin,
   recordSuccessfulLogin,
   requestIp,
@@ -83,8 +87,33 @@ export async function POST(req: Request) {
       include: { hotel: true },
     });
 
+    // SECURITY FIX (lockout oracle): the lockout is decided BEFORE the password
+    // is checked. Previously a locked account answered 423 only for the RIGHT
+    // password, which told an attacker when a guess was correct.
+    if (user) {
+      const lockout = await getLockoutStatus(user.id);
+      if (lockout.locked) {
+        const res = jsonError(
+          "This account is temporarily locked after too many failed attempts. Please try again later.",
+          423,
+          "ACCOUNT_LOCKED",
+        );
+        res.headers.set("Retry-After", String(lockout.retryAfterSeconds ?? 900));
+        return res;
+      }
+    }
+
+    // SECURITY FIX (timing enumeration): an unknown email used to skip scrypt
+    // entirely, so response time revealed which emails are registered. We now
+    // always run one scrypt verification (against a dummy hash when the user
+    // does not exist).
+    const passwordOk = await verifyPasswordAsync(
+      password,
+      user ? user.passwordHash : dummyPasswordHash(),
+    );
+
     // Generic message: never reveal whether the email exists
-    if (!user || !verifyPassword(password, user.passwordHash)) {
+    if (!user || !passwordOk) {
       if (user) {
         const lock = await recordFailedLogin({ userId: user.id, email, ip, hotelId: user.hotelId });
         if (lock.justLocked) {
@@ -95,9 +124,12 @@ export async function POST(req: Request) {
           );
         }
       } else {
+        // SECURITY FIX: unknown-email failures now count toward the shared per-IP
+        // throttle (previously they were only audited, so probing was unthrottled).
+        await recordAuthAttempt({ email, success: false, ip });
         await logAudit({
           action: AUDIT_ACTIONS.LOGIN_FAILED,
-          metadata: { email, unknownUser: true },
+          metadata: { unknownUser: true, emailDomain: email.split("@")[1] ?? null },
           ipAddress: ip,
         });
       }
@@ -108,16 +140,14 @@ export async function POST(req: Request) {
       );
     }
 
-    // Shared, persistent account lockout — enforced BEFORE issuing a session.
-    const lockout = await getLockoutStatus(user.id);
-    if (lockout.locked) {
-      const res = jsonError(
-        "This account is temporarily locked after too many failed attempts. Please try again later.",
-        423,
-        "ACCOUNT_LOCKED",
-      );
-      res.headers.set("Retry-After", String(lockout.retryAfterSeconds ?? 900));
-      return res;
+    // Transparent upgrade of legacy scrypt hashes to the current parameters.
+    if (needsRehash(user.passwordHash)) {
+      await db.user
+        .update({
+          where: { id: user.id },
+          data: { passwordHash: await hashPasswordAsync(password) },
+        })
+        .catch(() => undefined);
     }
 
     // SUPER_ADMIN accounts have no hotel tenant — they use the dedicated

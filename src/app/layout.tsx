@@ -1,7 +1,9 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { headers } from "next/headers";
 import { Toaster } from "@/components/ui/toaster";
+import { CspNonceProvider } from "@/components/app/csp-nonce";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -29,18 +31,26 @@ export const viewport: Viewport = {
   themeColor: "#b45309",
 };
 
-export default function RootLayout({
+/**
+ * SECURITY FIX (CSP nonce): the nonce is generated per request in src/proxy.ts.
+ * Statically prerendered HTML cannot carry it, so every page must render per
+ * request — reading headers() below opts the whole tree into dynamic rendering.
+ */
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const nonce = (await headers()).get("x-nonce") ?? undefined;
   return (
     <html lang="en" suppressHydrationWarning>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
       >
-        {children}
-        <Toaster />
+        <CspNonceProvider nonce={nonce}>
+          {children}
+          <Toaster />
+        </CspNonceProvider>
       </body>
     </html>
   );

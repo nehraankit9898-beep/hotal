@@ -69,6 +69,27 @@ export async function sendVerificationEmail(
   return { ...result, url };
 }
 
+/**
+ * Sent to the owner of an address that someone tried to register again.
+ * Used instead of telling the requester "this email exists" (enumeration fix).
+ */
+export async function sendAccountExistsEmail(to: string): Promise<EmailSendResult> {
+  const origin = safeOrigin();
+  const signIn = origin ? linkBlock(`${origin}/`, "Sign in") : "";
+  const { html, text } = renderEmailTemplate(
+    "You already have a StayLoop account",
+    `<p>Someone tried to register a new StayLoop account with this email address.</p>` +
+      `<p>If that was you, sign in instead. If it wasn't, you can ignore this message — your account has not changed.</p>${signIn}`,
+  );
+  return sendEmailWithRetry({
+    to,
+    subject: "StayLoop: you already have an account",
+    html,
+    text,
+    kind: "account-exists",
+  });
+}
+
 export async function sendPasswordResetEmail(
   to: string,
   token: string,

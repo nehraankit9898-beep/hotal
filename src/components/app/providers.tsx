@@ -3,8 +3,10 @@
 import { useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "next-themes";
+import { useCspNonce } from "@/components/app/csp-nonce";
 
 export function Providers({ children }: { children: React.ReactNode }) {
+  const nonce = useCspNonce();
   const [client] = useState(
     () =>
       new QueryClient({
@@ -20,7 +22,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
 
   return (
     <QueryClientProvider client={client}>
-      <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false}>
+      <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false} nonce={nonce}>
         {children}
       </ThemeProvider>
     </QueryClientProvider>

@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { hashPassword } from "@/lib/auth";
+import { hashPasswordAsync } from "@/lib/auth";
 import { jsonError, readJson, serverError } from "@/lib/api-helpers";
 import { assertCsrf } from "@/lib/csrf";
 import { parseWith, registerHotelSchema } from "@/lib/validation";
@@ -8,7 +8,7 @@ import { normalizePhone } from "@/lib/phone";
 import { requestIp } from "@/lib/login-security";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { issueSecurityToken } from "@/lib/security-tokens";
-import { sendVerificationEmail } from "@/lib/auth-emails";
+import { sendAccountExistsEmail, sendVerificationEmail } from "@/lib/auth-emails";
 import { logger } from "@/lib/logger";
 
 /**
@@ -18,6 +18,10 @@ import { logger } from "@/lib/logger";
  * Public endpoint: protected by per-IP rate limiting and Origin validation
  * (login-CSRF). Password strength is enforced; no default credentials exist.
  */
+/** Same wording for new and already-registered emails (enumeration fix). */
+const REGISTER_GENERIC_MESSAGE =
+  "If this email is new to StayLoop, check your inbox to verify it, then sign in. If you already have an account, sign in instead.";
+
 export async function POST(req: Request) {
   try {
     // Origin check for this public mutation (no session yet).
@@ -50,10 +54,17 @@ export async function POST(req: Request) {
 
     const existing = await db.user.findUnique({ where: { email } });
     if (existing) {
-      return jsonError(
-        "An account with this email already exists. Please sign in instead.",
-        409,
-        "EMAIL_EXISTS",
+      // ENUMERATION FIX: the response must not reveal whether an address is
+      // registered. The real owner gets a notice email; the requester gets the
+      // same 201 shape as a fresh registration (no hotel id, no account hint).
+      await sendAccountExistsEmail(email).catch((err) =>
+        logger.warn("register.account_exists_email_failed", {
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+      return Response.json(
+        { ok: true, message: REGISTER_GENERIC_MESSAGE, emailVerification: { sent: false } },
+        { status: 201 },
       );
     }
 
@@ -71,7 +82,7 @@ export async function POST(req: Request) {
           hotelId: hotel.id,
           name: adminName,
           email,
-          passwordHash: hashPassword(password),
+          passwordHash: await hashPasswordAsync(password),
           role: "HOTEL_ADMIN",
         },
       });
@@ -154,9 +165,7 @@ export async function POST(req: Request) {
     return Response.json(
       {
         ok: true,
-        message: verification.sent
-          ? "Hotel registered successfully. Check your inbox to verify your email address, then sign in."
-          : "Hotel registered successfully. You can now sign in.",
+        message: REGISTER_GENERIC_MESSAGE,
         hotel: { id: result.hotel.id, name: result.hotel.name },
         emailVerification: verification,
       },

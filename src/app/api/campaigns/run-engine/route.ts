@@ -2,7 +2,8 @@ import { db } from "@/lib/db";
 import { timingSafeEqual } from "crypto";
 import { requireAuth, jsonError, serverError } from "@/lib/api-helpers";
 import { requirePermission } from "@/lib/permissions";
-import { ensureFollowUpSteps, runFollowUpEngine } from "@/lib/campaigns";
+import { ensureFollowUpSteps, latestCheckoutByCustomer, runFollowUpEngine } from "@/lib/campaigns";
+import { hotelTimezone, sameZonedDay } from "@/lib/timezone";
 import { getFollowUpEngineSecret } from "@/lib/config";
 
 import { logAudit, AUDIT_ACTIONS } from "@/lib/audit";
@@ -27,29 +28,16 @@ export async function GET(req: Request) {
     const steps = await ensureFollowUpSteps(hotelId);
     const now = new Date();
 
-    // Eligibility preview: customers whose latest completed stay checked out N days ago
-    const visits = await db.visit.findMany({
-      where: { hotelId, checkout: { not: null } },
-      orderBy: { checkout: "desc" },
-      select: { customerId: true, checkout: true },
-    });
-    const latestByCustomer = new Map<string, Date>();
-    for (const v of visits) {
-      if (!latestByCustomer.has(v.customerId) && v.checkout) {
-        latestByCustomer.set(v.customerId, v.checkout);
-      }
-    }
-
-    const isSameDay = (a: Date, b: Date) =>
-      a.getFullYear() === b.getFullYear() &&
-      a.getMonth() === b.getMonth() &&
-      a.getDate() === b.getDate();
+    // Eligibility preview: customers whose latest completed stay checked out N days ago.
+    // Same hotel-timezone, DB-aggregated logic as the engine (no full table load).
+    const tz = await hotelTimezone(hotelId);
+    const latestByCustomer = await latestCheckoutByCustomer(hotelId);
 
     return Response.json({
       steps: steps.map((s) => {
         const targetDay = new Date(now.getTime() - s.offsetDays * 24 * 60 * 60 * 1000);
         const eligible = [...latestByCustomer.values()].filter((c) =>
-          isSameDay(c, targetDay),
+          sameZonedDay(c, targetDay, tz),
         ).length;
         return {
           id: s.id,

@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { hotelTimezone, sameZonedDay, startOfZonedDay } from "@/lib/timezone";
 import { providerStatus, type Channel, type TemplatePayload } from "@/lib/providers";
 import { resolveTenantProvider } from "@/lib/tenant-providers";
 import { personalize, type PersonalizationContext } from "@/lib/personalize";
@@ -304,8 +305,8 @@ export async function executeCampaignSend(
   });
 
   // ---- Daily rate limit (real + simulated deliveries both count) ---------
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
+  // Hotel-local day (see lib/timezone.ts) — not the server's local midnight.
+  const startOfDay = startOfZonedDay(new Date(), await hotelTimezone(ctx.hotelId));
   const sentToday = await db.campaignMessage.count({
     where: {
       hotelId: ctx.hotelId,
@@ -1001,12 +1002,25 @@ export interface EngineRunResult {
   }[];
 }
 
-function isSameCalendarDay(a: Date, b: Date): boolean {
-  return (
-    a.getFullYear() === b.getFullYear() &&
-    a.getMonth() === b.getMonth() &&
-    a.getDate() === b.getDate()
-  );
+
+/**
+ * Latest completed checkout per customer, computed in the database.
+ * PERF FIX: the engine used to load every checkout row of the hotel into memory
+ * on each run (and again per step). One grouped aggregate returns one row per
+ * customer instead.
+ */
+export async function latestCheckoutByCustomer(hotelId: string): Promise<Map<string, Date>> {
+  const rows = await db.visit.groupBy({
+    by: ["customerId"],
+    where: { hotelId, checkout: { not: null } },
+    _max: { checkout: true },
+  });
+  const map = new Map<string, Date>();
+  for (const row of rows) {
+    const checkout = row._max.checkout;
+    if (checkout) map.set(row.customerId, checkout);
+  }
+  return map;
 }
 
 /**
@@ -1025,6 +1039,8 @@ export async function runFollowUpEngine(
   await ensureSystemSegments(hotelId);
 
   const steps = await ensureFollowUpSteps(hotelId);
+  // Calendar-day matching happens in the hotel's timezone (lib/timezone.ts).
+  const tz = await hotelTimezone(hotelId);
   const result: EngineRunResult = {
     stepsProcessed: 0,
     customersProcessed: 0,
@@ -1039,21 +1055,12 @@ export async function runFollowUpEngine(
     result.stepsProcessed += 1;
 
     // Latest completed stay (has checkout) per customer
-    const visits = await db.visit.findMany({
-      where: { hotelId, checkout: { not: null } },
-      orderBy: { checkout: "desc" },
-    });
-    const latestByCustomer = new Map<string, Date>();
-    for (const v of visits) {
-      if (!latestByCustomer.has(v.customerId) && v.checkout) {
-        latestByCustomer.set(v.customerId, v.checkout);
-      }
-    }
+    const latestByCustomer = await latestCheckoutByCustomer(hotelId);
 
     const targetDay = new Date(now.getTime() - step.offsetDays * 24 * 60 * 60 * 1000);
     const customerIds: string[] = [];
     for (const [customerId, checkout] of latestByCustomer.entries()) {
-      if (isSameCalendarDay(checkout, targetDay)) customerIds.push(customerId);
+      if (sameZonedDay(checkout, targetDay, tz)) customerIds.push(customerId);
     }
     if (customerIds.length === 0) {
       result.details.push({

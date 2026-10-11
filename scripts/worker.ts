@@ -39,6 +39,7 @@ import {
 } from "../src/lib/queue";
 import { runJob, cleanupExpiredExports } from "../src/lib/jobs/handlers";
 import { purgeExpiredTokens } from "../src/lib/security-tokens";
+import { purgeOldAuthAttempts } from "../src/lib/login-security";
 // Phase 10 — SaaS lifecycle maintenance
 import { processTrialExpiry, processRenewals } from "../src/lib/saas/subscriptions";
 import { processScheduledGlobalFlags } from "../src/lib/saas/entitlements";
@@ -324,6 +325,8 @@ async function main(): Promise<never> {
       }
       if (now - lastHousekeeping > HOUSEKEEPING_EVERY_MS) {
         await purgeExpiredTokens().catch(() => 0);
+        // Login-attempt rows older than the throttle window are never read again.
+        await purgeOldAuthAttempts().catch(() => 0);
         cleanupExpiredExports(24);
         lastHousekeeping = now;
       }

@@ -43,6 +43,51 @@ function applyCorsHeaders(req: NextRequest, res: NextResponse): NextResponse {
   return res;
 }
 
+const IS_DEV = process.env.NODE_ENV !== "production";
+
+/**
+ * Razorpay Checkout JS (loaded by the tenant billing page) needs exactly these
+ * HTTPS hosts: the script, its iframe, and its XHR. Narrowly scoped.
+ */
+const RAZORPAY_CSP = {
+  script: "https://checkout.razorpay.com",
+  frame: "https://api.razorpay.com",
+  connect: "https://api.razorpay.com",
+  img: "https://checkout.razorpay.com https://api.razorpay.com",
+} as const;
+
+/** 128-bit base64 nonce, unique per request. */
+function generateNonce(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Buffer.from(bytes).toString("base64");
+}
+
+/**
+ * SECURITY FIX (CSP): the page policy used to contain 'unsafe-inline' for scripts,
+ * which lets any injected inline script run. Scripts now need the per-request
+ * nonce (Next.js applies it to its own bootstrap scripts automatically).
+ * 'unsafe-inline' remains for STYLES only (component libraries use style attributes).
+ * Dev keeps 'unsafe-eval' because React Refresh / Turbopack require it.
+ */
+function buildPageCsp(nonce: string): string {
+  // Embedding policy: explicit origins only in production (never a blind wildcard).
+  const frameAncestors = process.env.EMBED_FRAME_ANCESTORS?.trim() || (IS_DEV ? "*" : "'self'");
+  return [
+    "default-src 'self'",
+    `script-src 'self' 'nonce-${nonce}'${IS_DEV ? " 'unsafe-eval'" : ""} ${RAZORPAY_CSP.script}`,
+    "style-src 'self' 'unsafe-inline'",
+    `img-src 'self' data: blob: ${RAZORPAY_CSP.img}`,
+    "font-src 'self' data:",
+    `connect-src 'self' ${RAZORPAY_CSP.connect}`,
+    `frame-src 'self' ${RAZORPAY_CSP.frame}`,
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    `frame-ancestors ${frameAncestors}`,
+  ].join("; ");
+}
+
 export function proxy(req: NextRequest) {
   // Correlation id: forward an upstream id when present, else generate one.
   const incoming = req.headers.get("x-request-id");
@@ -62,13 +107,27 @@ export function proxy(req: NextRequest) {
     return preflight;
   }
 
-  const res = NextResponse.next();
+  if (isApi) {
+    const res = NextResponse.next();
+    res.headers.set("x-request-id", requestId);
+    return applyCorsHeaders(req, res);
+  }
+
+  // Pages: nonce-based CSP. The nonce goes on the REQUEST so Next.js can apply it
+  // to its inline bootstrap scripts, and the policy goes on the RESPONSE.
+  const nonce = generateNonce();
+  const csp = buildPageCsp(nonce);
+  const requestHeaders = new Headers(req.headers);
+  requestHeaders.set("x-nonce", nonce);
+  requestHeaders.set("Content-Security-Policy", csp);
+  const res = NextResponse.next({ request: { headers: requestHeaders } });
+  res.headers.set("Content-Security-Policy", csp);
   res.headers.set("x-request-id", requestId);
-  if (isApi) return applyCorsHeaders(req, res);
   return res;
 }
 
 export const config = {
-  // API routes only — pages set their own security headers in next.config.ts.
-  matcher: ["/api/:path*"],
+  // Everything except static build assets (they carry no HTML and no nonce).
+  // API routes keep CORS handling; pages get the nonce CSP.
+  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
 };

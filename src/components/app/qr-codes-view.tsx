@@ -378,6 +378,11 @@ async function printQr(q: QrCodeRow) {
   <style>body{font-family:system-ui,sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0;gap:16px}
   h1{font-size:22px;margin:0}p{color:#555;font-size:14px;margin:0}img{width:340px;height:340px}</style></head>
   <body><h1>Scan &amp; Join Rewards</h1><img src="${dataUrl}" alt="QR code"/><p>${q.url}</p>
-  <script>window.onload=function(){setTimeout(function(){window.print()},300)}</script></body></html>`);
+  </body></html>`);
   w.document.close();
+  // SECURITY FIX: no inline <script> inside the new window — it inherits the app's
+  // nonce-based CSP and would be blocked. Print from the opener once it has loaded.
+  const doPrint = () => setTimeout(() => w.print(), 300);
+  if (w.document.readyState === "complete") doPrint();
+  else w.addEventListener("load", doPrint, { once: true });
 }

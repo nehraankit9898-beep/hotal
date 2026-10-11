@@ -108,7 +108,12 @@ export function assertCsrf(
       const idx = part.indexOf("=");
       if (idx === -1) continue;
       if (part.slice(0, idx).trim() === CSRF_COOKIE) {
-        cookieToken = decodeURIComponent(part.slice(idx + 1).trim());
+        // SECURITY/ROBUSTNESS FIX: malformed percent-encoding must not throw (500).
+        try {
+          cookieToken = decodeURIComponent(part.slice(idx + 1).trim());
+        } catch {
+          cookieToken = "";
+        }
       }
     }
     const headerToken = req.headers.get(CSRF_HEADER) ?? "";
