@@ -1,7 +1,12 @@
 import { db } from "@/lib/db";
 import { requireAuth, jsonError, readJson, serverError } from "@/lib/api-helpers";
 import { requirePermission } from "@/lib/permissions";
-import { createReservation, transitionReservation, ReservationConflictError } from "@/lib/reservations";
+import {
+  createReservation,
+  transitionReservation,
+  ReservationConflictError,
+  ReservationValidationError,
+} from "@/lib/reservations";
 
 /**
  * Phase 16 — reservations (staff side).
@@ -69,6 +74,9 @@ export async function POST(req: Request) {
       });
       return Response.json({ reservation }, { status: 201 });
     } catch (err) {
+      if (err instanceof ReservationValidationError) {
+        return jsonError(err.message, 422, "VALIDATION_ERROR");
+      }
       if (err instanceof ReservationConflictError) {
         return jsonError(err.message, 409, "SLOT_CONFLICT");
       }

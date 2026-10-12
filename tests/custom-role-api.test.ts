@@ -66,7 +66,10 @@ describe("custom role API — authoritative server permissions and revocation", 
     expect((await login(HOTEL_A_STAFF, STAFF_PASSWORD)).res.status).not.toBe(200);
     const restore = await apiCall("PATCH", `/api/staff/${target?.id}`, { jar: admin.jar, body: { reactivate: true } });
     expect(restore.status).toBe(200);
+    // A reserved/ungrantable permission is a VALIDATION failure: 422, the same
+    // code the sibling PATCH handler and the rest of this POST route use for
+    // invalid payloads (this assertion used to pin the old 400 fallback).
     expect((await apiCall("POST", "/api/custom-roles", { jar: admin.jar,
-      body: { name: `${name} forbidden`, permissions: ["SUPER_ADMIN_ACCESS"] } })).status).toBe(400);
+      body: { name: `${name} forbidden`, permissions: ["SUPER_ADMIN_ACCESS"] } })).status).toBe(422);
   }, 120_000);
 });

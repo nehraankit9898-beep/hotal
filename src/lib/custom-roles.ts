@@ -138,7 +138,12 @@ export async function createCustomRole(
     return { ok: false, error: "You do not have permission to manage custom roles.", status: 403 };
   }
   const validation = validateCustomRolePermissions(permissions, user.role, callerPermissions);
-  if (!validation.ok) return { ok: false, error: validation.error };
+  // BUG FIX (API contract): an ungrantable permission is a VALIDATION error and
+  // must be reported as 422 — the same route's PATCH handler and every other
+  // validated payload in this API return 422. Without the explicit status the
+  // POST handler fell back to 400, so the documented contract (and the Phase 17
+  // regression suite) saw a different code for the same class of error.
+  if (!validation.ok) return { ok: false, error: validation.error, status: 422 };
   try {
     const role = await db.customRole.create({
       data: {
