@@ -2,6 +2,7 @@ import { db } from "@/lib/db";
 import { jsonError, readJson } from "@/lib/api-helpers";
 import { verifyGatewaySignature, restaurantGatewayCredentials, recordGatewayCapture } from "@/lib/billing";
 import { limitPaymentLinkRequest } from "@/lib/payment-link-limit";
+import { settlePaymentLink } from "@/lib/payment-link-settle";
 
 type Ctx = { params: Promise<{ token: string }> };
 
@@ -60,7 +61,15 @@ export async function POST(req: Request, ctx: Ctx) {
   });
   if (!result.ok) return jsonError(result.reason ?? "Capture rejected.", 422, "CAPTURE_REJECTED");
 
-  // Link settles on capture.
-  await db.paymentLink.update({ where: { id: link.id }, data: { status: "PAID", paidAt: new Date() } }).catch(() => undefined);
+  // Link settles on capture. PAY-001: never swallow a failure here — the money
+  // is already allocated, so answer with a retryable 503 (the retry hits the
+  // idempotent duplicate path in recordGatewayCapture and settles the link).
+  const settled = await settlePaymentLink({ id: link.id, hotelId: link.hotelId, billId: link.billId });
+  if (!settled) {
+    return Response.json(
+      { error: { code: "LINK_SETTLE_PENDING", message: "Payment received; confirmation is still being finalised. Please retry shortly." } },
+      { status: 503, headers: { "Retry-After": "5" } },
+    );
+  }
   return Response.json({ ok: true, billStatus: result.billStatus ?? null });
 }

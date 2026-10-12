@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { jsonError } from "@/lib/api-helpers";
 import { recordGatewayCapture } from "@/lib/billing";
 import { logAudit } from "@/lib/audit";
+import { settlePaymentLinkForIntent } from "@/lib/payment-link-settle";
 
 /**
  * Phase 14 — Razorpay webhook for RESTAURANT bill payments (provider-native).
@@ -166,6 +167,16 @@ export async function POST(req: Request) {
       metadata: { eventId, reason: result.reason ?? "Capture rejected.", gatewayOrderId, gatewayPaymentId },
     });
     return jsonError(result.reason ?? "Capture rejected.", 422, "CAPTURE_REJECTED");
+  }
+
+  // PAY-001 follow-up: settle the payment link that created this intent, so it
+  // does not stay ACTIVE when the customer never returns to the page. The
+  // allocation above is idempotent, so on failure we release the dedupe fence
+  // and answer 503 — Razorpay re-delivers and only the link update is retried.
+  const linkSettled = await settlePaymentLinkForIntent(intent);
+  if (!linkSettled) {
+    await db.restaurantWebhookEvent.deleteMany({ where: { provider: "RAZORPAY", eventId } });
+    return jsonError("Payment allocated; payment link settlement failed, please retry.", 503, "LINK_SETTLE_PENDING");
   }
   return Response.json({ ok: true });
 }

@@ -284,6 +284,8 @@ async function main() {
       "tests/custom-role-resolution.test.ts",
       "tests/custom-role-api.test.ts",
       "tests/payment-link-limit.test.ts",
+      "tests/payment-link-settle.test.ts",
+      "tests/payment-callback-routes.test.ts",
     ];
     const unregistered = readdirSync(join(ROOT, "tests"))
       .filter((f) => f.endsWith(".test.ts"))
