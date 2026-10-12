@@ -305,7 +305,12 @@ async function main() {
       // Phase 14/15/16 files hit many brand-new routes; dev-mode Next.js
       // compiles each on first request (tens of seconds). The longer timeout
       // absorbs first-hit compilation, not slow business logic.
-      const timeout = file.includes("phase14") || file.includes("phase15") || file.includes("phase16") || file.includes("phase17") ? "120000" : "30000";
+      //
+      // phase11-scheduler additionally spawns the Prisma CLI (`prisma db
+      // push`) inside its own test, which alone takes ~60 s on a cold cache —
+      // past Bun's 30 s default, so it flaked with "(unnamed) [30015ms]".
+      const longFiles = ["phase11", "phase14", "phase15", "phase16", "phase17"];
+      const timeout = longFiles.some((f) => file.includes(f)) ? "120000" : "30000";
       failures += await runInherited("bun", ["test", file, "--timeout", timeout], testEnv);
       await ensureServerHealthy(`after ${file}`);
     }

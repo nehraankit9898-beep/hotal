@@ -27,6 +27,14 @@ import { getAISettings, logAIInteraction } from "@/lib/ai/governance";
 export const WALLET_PROVIDER_STATUS = "BLOCKED_PROVIDER_ACCESS" as const;
 
 export interface WalletPassView {
+  /**
+   * BUG FIX (API contract): the issue endpoint used to omit the row id while
+   * `POST /api/wallet/passes/[id]/revoke` requires exactly that id, so a
+   * client could not revoke the pass it had just issued without an extra
+   * `GET /api/wallet/passes` round-trip (the integration test worked around
+   * it by listing first). The id is now part of the view.
+   */
+  id: string;
   serialNumber: string;
   platform: string;
   status: string;
@@ -149,11 +157,12 @@ export function verifyPassUpdate(serial: string, token: string, signature: strin
 }
 
 function toView(
-  row: { serialNumber: string; platform: string; status: string; pointsAtIssue: number; issuedAt: Date; revokedAt: Date | null },
+  row: { id: string; serialNumber: string; platform: string; status: string; pointsAtIssue: number; issuedAt: Date; revokedAt: Date | null },
   points: number,
   tier: string,
 ): WalletPassView {
   return {
+    id: row.id,
     serialNumber: row.serialNumber,
     platform: row.platform,
     status: row.status,

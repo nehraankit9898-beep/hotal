@@ -55,16 +55,31 @@ export class ReservationConflictError extends Error {
   }
 }
 
+/**
+ * BUG FIX (API contract): malformed input used to be thrown as a
+ * ReservationConflictError, so a payload with a wrong date/time format or a
+ * non-positive party size was answered with `409 SLOT_CONFLICT` — the code
+ * that means "that table slot is already taken". Clients (and the booking UI)
+ * could not tell a typo apart from a real double-booking. Shape/type problems
+ * are now a distinct error the route maps to `422 VALIDATION_ERROR`; genuine
+ * availability and policy conflicts stay 409.
+ */
+export class ReservationValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+  }
+}
+
 export async function createReservation(input: CreateReservationInput) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(input.date)) {
-    throw new ReservationConflictError("date must be YYYY-MM-DD (tenant-local).");
+    throw new ReservationValidationError("date must be YYYY-MM-DD (tenant-local).");
   }
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(input.startTime)) {
-    throw new ReservationConflictError("startTime must be HH:MM (tenant-local).");
+    throw new ReservationValidationError("startTime must be HH:MM (tenant-local).");
   }
   const partySize = Math.floor(input.partySize);
   if (!Number.isFinite(partySize) || partySize <= 0) {
-    throw new ReservationConflictError("partySize must be a positive integer.");
+    throw new ReservationValidationError("partySize must be a positive integer.");
   }
   const duration = Math.min(Math.max(Math.floor(input.durationMinutes ?? 90), 30), 300);
 
