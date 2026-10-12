@@ -14,7 +14,7 @@
  * Usage: bun run test
  */
 import { spawn, spawnSync } from "child_process";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, readdirSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
 
@@ -30,6 +30,23 @@ const TEST_SECRETS = {
 
 function wait(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Run a child with inherited stdio and resolve with its exit code WITHOUT
+ * blocking this process. BUG FIX: test files used to run via spawnSync, which
+ * froze this event loop for the whole file, so nothing drained the dev
+ * server's stdout/stderr pipes. Once a chatty file filled the ~200 KB socket
+ * buffer, the server's next (synchronous) log write blocked ITS event loop —
+ * every request hung, even DB-free routes (the "wedge" the watchdog below was
+ * restarting the server for).
+ */
+function runInherited(cmd: string, args: string[], env: NodeJS.ProcessEnv): Promise<number> {
+  return new Promise((resolveExit) => {
+    const child = spawn(cmd, args, { cwd: ROOT, env, stdio: "inherit" });
+    child.on("error", () => resolveExit(1));
+    child.on("close", (code) => resolveExit(code ?? 1));
+  });
 }
 
 async function waitForServer(timeoutMs = 90_000): Promise<boolean> {
@@ -51,8 +68,11 @@ async function waitForServer(timeoutMs = 90_000): Promise<boolean> {
  *
  * Dev-mode Next.js (Turbopack) can very rarely wedge its request pipeline
  * between long-running suites (observed: server accepts connections but stops
- * responding, even on DB-free routes). This check pings the liveness endpoint
- * after every suite; a wedged/crashed dev server is RESTARTED so the remaining
+ * responding, even on DB-free routes). The main cause was this runner never
+ * draining the server's stdio while a suite ran (fixed: see runInherited);
+ * the watchdog stays as a safety net for crashes. This check pings the
+ * liveness endpoint after every suite; a wedged/crashed dev server is
+ * RESTARTED so the remaining
  * suites still run and the failure is recorded loudly instead of cascading
  * every subsequent suite into timeouts. This is a test-infrastructure
  * resilience measure — application behavior is covered by the suites
@@ -255,46 +275,40 @@ async function main() {
       // flags, recommendations approval, forecast honesty, wallet security,
       // voice parsing, sustainability labels).
       "tests/phase18-ai.test.ts",
+      // DB-free regression suites: the 2026 audit fixes and the hardening
+      // checks were never registered here, so `bun run test` (and CI) skipped
+      // them. The guard below now fails the run if any suite is unregistered.
+      "tests/audit-2026-regressions.test.ts",
+      "tests/security-hardening.test.ts",
+      "tests/bugfix-regressions-2026-10.test.ts",
     ];
+    const unregistered = readdirSync(join(ROOT, "tests"))
+      .filter((f) => f.endsWith(".test.ts"))
+      .map((f) => `tests/${f}`)
+      .filter((f) => !TEST_FILES.includes(f));
+    if (unregistered.length > 0) {
+      console.error(`\n✗ Test files missing from TEST_FILES (scripts/run-tests.ts): ${unregistered.join(", ")}`);
+      failures += 1;
+    }
     for (const file of TEST_FILES) {
       console.log(`\n  ▸ ${file}`);
       // Phase 14/15/16 files hit many brand-new routes; dev-mode Next.js
       // compiles each on first request (tens of seconds). The longer timeout
       // absorbs first-hit compilation, not slow business logic.
       const timeout = file.includes("phase14") || file.includes("phase15") || file.includes("phase16") || file.includes("phase17") ? "120000" : "30000";
-      const run = spawnSync("bun", ["test", file, "--timeout", timeout], {
-        cwd: ROOT,
-        env: testEnv,
-        stdio: "inherit",
-      });
-      failures += run.status ?? 1;
+      failures += await runInherited("bun", ["test", file, "--timeout", timeout], testEnv);
       await ensureServerHealthy(`after ${file}`);
     }
 
     // 5. Functional acceptance suites
     console.log("\n[5/6] Running functional acceptance suites…");
-    const run2 = spawnSync("bun", ["run", "scripts/test-phase1.ts"], {
-      cwd: ROOT,
-      env: testEnv,
-      stdio: "inherit",
-    });
-    failures += run2.status ?? 1;
+    failures += await runInherited("bun", ["run", "scripts/test-phase1.ts"], testEnv);
     await ensureServerHealthy("after phase1");
 
-    const run3 = spawnSync("bun", ["run", "scripts/test-phase2.ts"], {
-      cwd: ROOT,
-      env: testEnv,
-      stdio: "inherit",
-    });
-    failures += run3.status ?? 1;
+    failures += await runInherited("bun", ["run", "scripts/test-phase2.ts"], testEnv);
     await ensureServerHealthy("after phase2");
 
-    const run4 = spawnSync("bun", ["run", "scripts/test-phase63.ts"], {
-      cwd: ROOT,
-      env: testEnv,
-      stdio: "inherit",
-    });
-    failures += run4.status ?? 1;
+    failures += await runInherited("bun", ["run", "scripts/test-phase63.ts"], testEnv);
     await ensureServerHealthy("after phase63");
   } finally {
     // 6. Teardown

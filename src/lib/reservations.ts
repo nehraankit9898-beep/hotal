@@ -3,10 +3,12 @@
  *
  * CONCURRENCY SAFETY: booking runs inside a transaction that re-checks
  * overlapping ACTIVE reservations for the same table; the DB-level
- * (tableId, date, startTime) unique index is the final fence. Two concurrent
- * requests for the same slot can never both win — the loser gets a clear
- * CONFLICT response. Party capacity is checked against the hotel's
- * reservationMaxPartySize setting.
+ * (tableId, date, startTime, activeFence) unique index is the final fence.
+ * Two concurrent requests for the same slot can never both win — the loser
+ * gets a clear CONFLICT response. activeFence is 1 only while a reservation
+ * is ACTIVE, so cancelled / no-show / completed rows never block a slot.
+ * Party capacity is checked against the hotel's reservationMaxPartySize
+ * setting.
  *
  * Time model: local business date "YYYY-MM-DD" + "HH:MM" strings in the
  * TENANT timezone (matches the financial-day convention from Phase 14);
@@ -119,13 +121,14 @@ export async function createReservation(input: CreateReservationInput) {
             notes: input.notes?.slice(0, 500) ?? null,
             source: input.source ?? "STAFF",
             createdByUserId: input.createdByUserId ?? null,
+            activeFence: 1,
           },
         });
       },
       { timeout: 30_000 },
     );
   } catch (err) {
-    // Unique fence: (tableId, date, startTime) — the concurrent loser lands here.
+    // Unique fence: (tableId, date, startTime, activeFence) — the concurrent loser lands here.
     if (
       typeof err === "object" &&
       err !== null &&
@@ -175,6 +178,9 @@ export async function transitionReservation(
       seatedAt: to === "SEATED" ? new Date() : reservation.seatedAt,
       cancelledAt: to === "CANCELLED" ? new Date() : reservation.cancelledAt,
       cancelReason: to === "CANCELLED" ? (cancelReason ?? reservation.cancelReason) : reservation.cancelReason,
+      // BUG FIX: inactive reservations kept holding the (tableId, date,
+      // startTime) unique slot, so a cancelled slot could never be re-booked.
+      activeFence: (ACTIVE_STATUSES as readonly string[]).includes(to) ? 1 : null,
     },
   });
   if (updated.count !== 1) {

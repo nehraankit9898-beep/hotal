@@ -29,6 +29,34 @@ export function convertUnit(qty: number, from: string, to: string): number | nul
   return null; // incompatible (PIECE vs GRAM etc.)
 }
 
+/**
+ * Goods-receipt quantities for a purchase order, merged per ingredient.
+ *
+ * BUG FIX: the receipt fence is ONE PURCHASE ledger row per (ingredient, PO),
+ * but a PO may list the same ingredient on several lines (split deliveries,
+ * different unit prices). Receiving line by line let the first line's ledger
+ * row fence out every later line for that ingredient, so their quantity was
+ * silently never added to stock while the PO total still included it. Lines
+ * are merged first (qty summed, unit cost = qty-weighted average; a single
+ * line keeps its exact unit cost), then one fenced movement is recorded.
+ */
+export function aggregateReceiptLines(
+  lines: ReadonlyArray<{ ingredientId: string; qty: number; unitCostMinor: number }>,
+): Array<{ ingredientId: string; qty: number; unitCostMinor: number }> {
+  const byIngredient = new Map<string, { qty: number; cost: number }>();
+  for (const line of lines) {
+    const agg = byIngredient.get(line.ingredientId) ?? { qty: 0, cost: 0 };
+    agg.qty += line.qty;
+    agg.cost += line.qty * line.unitCostMinor;
+    byIngredient.set(line.ingredientId, agg);
+  }
+  return [...byIngredient].map(([ingredientId, agg]) => ({
+    ingredientId,
+    qty: Math.round(agg.qty * 1e6) / 1e6,
+    unitCostMinor: agg.qty > 0 ? Math.round(agg.cost / agg.qty) : 0,
+  }));
+}
+
 /** Append a ledger movement atomically; returns the new balance.
  *
  * AUDIT FIX (P16-INV-1): the previous read-modify-write (`stockQty = read +

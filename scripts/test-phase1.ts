@@ -42,15 +42,19 @@ interface Res {
   body: any;
 }
 
+/** The CSRF double-submit token from a cookie jar string ("" if absent). */
+function csrfFrom(cookie?: string): string {
+  let csrf = "";
+  for (const part of (cookie ?? "").split(";")) {
+    const [k, ...rest] = part.trim().split("=");
+    if (k === "stayloop_csrf") csrf = decodeURIComponent(rest.join("="));
+  }
+  return csrf;
+}
+
 async function call(method: string, path: string, body?: unknown, cookie?: string): Promise<Res> {
   // Phase 8: echo the CSRF double-submit cookie on state-changing requests.
-  let csrf = "";
-  if (cookie) {
-    for (const part of cookie.split(";")) {
-      const [k, ...rest] = part.trim().split("=");
-      if (k === "stayloop_csrf") csrf = decodeURIComponent(rest.join("="));
-    }
-  }
+  const csrf = csrfFrom(cookie);
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: {
@@ -583,10 +587,12 @@ async function main() {
     r.status === 201 && typeof r.body.customer.name === "string",
   );
 
-  // 11.2 Logout invalidates session
+  // 11.2 Logout invalidates session. Logout is CSRF-protected (SEC-006), so
+  // send the double-submit token like call() does — without it the request
+  // is rejected (403) and the session is never revoked.
   resB = await fetch(`${BASE}/api/auth/logout`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", cookie: adminBCookie },
+    headers: { "Content-Type": "application/json", cookie: adminBCookie, "x-csrf-token": csrfFrom(adminBCookie) },
   });
   const clearedCookie = getCookie(resB);
   r = await call("GET", "/api/auth/me", undefined, clearedCookie || adminBCookie);

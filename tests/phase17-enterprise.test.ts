@@ -138,6 +138,44 @@ describe("Phase 17 — Outbound webhooks", () => {
     const del = await apiCall("DELETE", `/api/webhooks/${id}`, { jar });
     expect(del.status).toBe(200);
   });
+
+  test("deliveries never follow redirects — a 3xx is dead-lettered", async () => {
+    // Regression (SSRF): fetch followed redirects by default, so an endpoint
+    // could bounce deliveries to internal http:// services.
+    const hits: string[] = [];
+    const receiver = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req) {
+        const path = new URL(req.url).pathname;
+        hits.push(`${req.method} ${path}`);
+        if (path === "/hook") {
+          return new Response(null, { status: 303, headers: { location: `http://127.0.0.1:${receiver.port}/internal` } });
+        }
+        return new Response("internal", { status: 200 });
+      },
+    });
+    try {
+      // http + loopback is allowed outside production (contract tests).
+      const create = await apiCall("POST", "/api/webhooks", {
+        jar,
+        body: { url: `http://127.0.0.1:${receiver.port}/hook`, events: ["p17.redirect"] },
+      });
+      expect(create.status).toBe(201);
+      const { enqueueWebhookEvent, deliverWebhook } = await import("../src/lib/webhooks-out");
+      const { db } = await import("../src/lib/db");
+      expect((await enqueueWebhookEvent(fresh.hotelId, "p17.redirect", { ok: true })).queued).toBe(1);
+      const delivery = await db.webhookDelivery.findFirst({ where: { endpointId: create.body.id } });
+      const result = await deliverWebhook(delivery!.id);
+      expect(result.ok).toBe(false);
+      expect(result.status).toBe(303);
+      const row = await db.webhookDelivery.findUnique({ where: { id: delivery!.id } });
+      expect(row?.status).toBe("DEAD");
+      expect(hits).toEqual(["POST /hook"]);
+    } finally {
+      receiver.stop(true);
+    }
+  });
 });
 
 describe("Phase 17 — A/B experiments", () => {

@@ -2383,8 +2383,8 @@ enum ReservationSource {
 
 /// Table reservation. Concurrency safety: booking runs inside a transaction
 /// that re-checks overlapping ACTIVE reservations for the same table (and the
-/// (tableId,date,startTime) unique index as a final fence) — two concurrent
-/// requests can never double-book the same table/slot.
+/// (tableId,date,startTime,activeFence) unique index as a final fence) — two
+/// concurrent requests can never double-book the same table/slot.
 model Reservation {
   id                String            @id @default(uuid())
   hotelId           String
@@ -2407,10 +2407,15 @@ model Reservation {
   tableSessionId    String? // linked when the guests are seated
   cancelledAt       DateTime?
   cancelReason      String?
+  // Slot fence (TableSession.openFence pattern): 1 while the reservation is
+  // ACTIVE (PENDING/CONFIRMED/SEATED), NULL once CANCELLED/NO_SHOW/COMPLETED.
+  // NULLs are distinct in unique indexes on SQLite and PostgreSQL, so an
+  // inactive reservation no longer blocks its table/date/start time.
+  activeFence       Int?              @default(1)
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
-  @@unique([tableId, date, startTime])
+  @@unique([tableId, date, startTime, activeFence])
   @@index([hotelId, date])
   @@index([hotelId, status])
 }

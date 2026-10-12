@@ -136,8 +136,10 @@ export async function PATCH(req: Request) {
     if (body.action === "RECEIVE") {
       if (po.status !== "SUBMITTED") return jsonError("Only SUBMITTED orders can be received.", 422, "INVALID_STATE");
       // Goods receipt → PURCHASE ledger rows (exactly-once via ledger fence).
-      const { recordMovement } = await import("@/lib/inventory");
-      for (const line of po.lines) {
+      // One movement per ingredient: the fence is per (ingredient, PO), so
+      // duplicate-ingredient lines must be merged first.
+      const { recordMovement, aggregateReceiptLines } = await import("@/lib/inventory");
+      for (const line of aggregateReceiptLines(po.lines)) {
         await db.$transaction(
           async (tx) => {
             const fence = await tx.stockLedger.findUnique({
