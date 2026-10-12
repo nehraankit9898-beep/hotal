@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getSession, SESSION_COOKIE, clearSessionCookieOptions, CSRF_COOKIE } from "@/lib/auth";
+import { getSessionAuth, SESSION_COOKIE, clearSessionCookieOptions, CSRF_COOKIE } from "@/lib/auth";
+import { assertCsrf } from "@/lib/csrf";
+import { jsonError } from "@/lib/api-helpers";
 import { logAudit, AUDIT_ACTIONS } from "@/lib/audit";
 import { requestIp } from "@/lib/login-security";
 
@@ -11,7 +13,18 @@ import { requestIp } from "@/lib/login-security";
  * clearing the cookie. Applies to both cookie and Bearer sessions.
  */
 export async function POST(req: Request) {
-  const session = getSession(req);
+  // AUDIT FIX (SEC-006): logout is state-changing (bumps tokenVersion, revoking every
+  // session of the user). Session cookies are SameSite=None in production, so without
+  // this check a cross-site page could force-logout any signed-in user (logout CSRF).
+  const info = getSessionAuth(req);
+  const csrf = assertCsrf(req, {
+    bearerSession: info?.via === "bearer",
+    hasCookieSession: info?.via === "cookie",
+  });
+  if (!csrf.ok && csrf.status && csrf.code) {
+    return jsonError(csrf.message ?? "Request blocked.", csrf.status, csrf.code);
+  }
+  const session = info?.session ?? null;
   if (session) {
     try {
       await db.user.update({

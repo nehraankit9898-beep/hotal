@@ -4,6 +4,7 @@ import { requirePermission } from "@/lib/permissions";
 import { issueActivationToken } from "@/lib/super-admin";
 import { logAudit, AUDIT_ACTIONS } from "@/lib/audit";
 import { withHotelWriteLock } from "@/lib/saas/limits";
+import { canActOnStaffTarget } from "@/lib/staff-guards";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -52,6 +53,11 @@ export async function PATCH(req: Request, ctx: Ctx) {
       select: { id: true, name: true, email: true, role: true, status: true },
     });
     if (!user) return jsonError("Staff member not found.", 404, "NOT_FOUND");
+    // AUDIT FIX (SEC-001): an admin may not act on the owner account (suspend,
+    // demote, revoke sessions, re-invite). Only the owner may.
+    if (!canActOnStaffTarget(auth.user.role, user.role)) {
+      return jsonError("Only the account owner can change the owner account.", 403, "FORBIDDEN");
+    }
 
     const body = await readJson(req);
     if (!body) return jsonError("Invalid request. Please try again.");

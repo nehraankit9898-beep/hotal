@@ -131,13 +131,24 @@ export async function POST(req: Request) {
     return jsonError("Webhook amount does not match the intent.", 422, "AMOUNT_MISMATCH");
   }
 
-  const result = await recordGatewayCapture({
-    hotelId: intent.hotelId,
-    intentPaymentId: intent.id,
-    gatewayOrderId,
-    gatewayPaymentId,
-    expectedAmountMinor: intent.amountMinor,
-  });
+  // AUDIT FIX (FIN-001): recordGatewayCapture THROWS on non-unique DB errors
+  // (timeouts, "bill changed during capture" conflicts). Without this guard the
+  // dedupe row survived, every provider retry was answered "duplicate", and the
+  // captured payment was never allocated. Release the fence and re-throw so the
+  // provider re-delivers (allocation stays exactly-once via the gatewayPaymentId fence).
+  let result: Awaited<ReturnType<typeof recordGatewayCapture>>;
+  try {
+    result = await recordGatewayCapture({
+      hotelId: intent.hotelId,
+      intentPaymentId: intent.id,
+      gatewayOrderId,
+      gatewayPaymentId,
+      expectedAmountMinor: intent.amountMinor,
+    });
+  } catch (err) {
+    await db.restaurantWebhookEvent.deleteMany({ where: { provider: "RAZORPAY", eventId } });
+    throw err;
+  }
   if (!result.ok) {
     // AUDIT FIX (P14-WBH-1): the dedupe row was committed BEFORE allocation,
     // so a transient failure here answered every provider retry with
