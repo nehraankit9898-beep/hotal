@@ -24,9 +24,30 @@ const RESERVED_PERMISSIONS = new Set<Permission>([
   "ENTERPRISE_API_MANAGE", "WEBHOOK_MANAGE", "PRIVACY_REQUEST_MANAGE",
   "BILL_REFUND", "BILL_VOID", "TAX_MANAGE", "AUDIT_LOG_READ",
 ]);
-const ALLOWED_CUSTOM_PERMISSIONS = new Set<Permission>(
-  PERMISSIONS.filter((p) => !RESERVED_PERMISSIONS.has(p)),
-);
+
+/**
+ * BUG FIX (import cycle): this module sits in the cycle
+ *   permissions.ts → api-helpers.ts → custom-roles.ts → permissions.ts
+ * (`permissions` needs `jsonError`, `api-helpers` needs `resolveUserPermissions`,
+ * this file needs the `PERMISSIONS` catalog). Building the allowlist at module
+ * scope therefore read `PERMISSIONS` while `permissions.ts` was still
+ * initializing whenever that file was the first of the three to load — every
+ * such load died with
+ *   ReferenceError: Cannot access 'PERMISSIONS' before initialization
+ * (this is what broke `bun test tests/unit.test.ts`, and would break any route
+ * or script that imports `@/lib/permissions` before `@/lib/api-helpers`).
+ * The catalog is now read on FIRST USE, by which time every module in the
+ * cycle has finished evaluating. Nothing else about the allowlist changes.
+ */
+let allowedCustomPermissions: Set<Permission> | null = null;
+function allowedCustomRolePermissions(): Set<Permission> {
+  if (allowedCustomPermissions === null) {
+    allowedCustomPermissions = new Set<Permission>(
+      PERMISSIONS.filter((p) => !RESERVED_PERMISSIONS.has(p)),
+    );
+  }
+  return allowedCustomPermissions;
+}
 
 /**
  * Validate that all requested permissions are in the allowlist AND that the
@@ -41,7 +62,7 @@ export function validateCustomRolePermissions(
 ): { ok: true; permissions: Permission[] } | { ok: false; error: string } {
   const result: Permission[] = [];
   for (const raw of requested) {
-    if (!ALLOWED_CUSTOM_PERMISSIONS.has(raw as Permission)) {
+    if (!allowedCustomRolePermissions().has(raw as Permission)) {
       return { ok: false, error: `Permission cannot be granted via custom roles: ${raw}` };
     }
     // Owner can only assign permissions they themselves hold.
@@ -83,7 +104,7 @@ export async function resolveUserPermissions(
       const parsed = JSON.parse(a.customRole.permissions);
       if (Array.isArray(parsed)) {
         for (const p of parsed) {
-          if (typeof p === "string" && ALLOWED_CUSTOM_PERMISSIONS.has(p as Permission)) {
+          if (typeof p === "string" && allowedCustomRolePermissions().has(p as Permission)) {
             extra.add(p as Permission);
           }
         }

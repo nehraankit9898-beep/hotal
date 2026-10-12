@@ -17,6 +17,7 @@ fixed with a root-cause change and covered by regression tests.
 | BUG-7 | Medium | Test infra / CI | Two suites never ran, four could never pass, and the runner itself caused the dev-server "wedge" |
 | BUG-8 | High | Platform ops | Super Admin backups API route was never committed (`.gitignore`) — Backups page 404 |
 | BUG-9 | Low | AI chatbot | WhatsApp webhook `replies` diagnostics always empty — the chatbot E2E suite could never pass |
+| BUG-10 | High | RBAC / build health | Import cycle made `@/lib/permissions` un-loadable as an entry module — `tests/unit.test.ts` (and `bun run test`) died before a single assertion |
 
 ---
 
@@ -193,6 +194,61 @@ and all six chatbot end-to-end tests in `phase18-ai` fail, hiding any real
 chatbot regression.
 
 **Fix:** each reply produced by the engine is recorded in `replies`.
+
+---
+
+## BUG-10 — `@/lib/permissions` could not be the entry module of its own import cycle
+
+**Where:** `src/lib/custom-roles.ts` (module-scope `ALLOWED_CUSTOM_PERMISSIONS`),
+in the cycle `permissions.ts → api-helpers.ts → custom-roles.ts → permissions.ts`
+(`permissions` imports `jsonError`, `api-helpers` imports `resolveUserPermissions`,
+`custom-roles` imports the `PERMISSIONS` catalog).
+
+**What:** `custom-roles.ts` built its custom-role allowlist at module scope:
+
+```ts
+const ALLOWED_CUSTOM_PERMISSIONS = new Set<Permission>(
+  PERMISSIONS.filter((p) => !RESERVED_PERMISSIONS.has(p)),
+);
+```
+
+When `permissions.ts` is the first of the three modules to be evaluated, its
+`PERMISSIONS` binding is still in the temporal dead zone while `custom-roles.ts`
+runs, so the whole graph throws:
+
+```
+ReferenceError: Cannot access 'PERMISSIONS' before initialization.
+    at src/lib/custom-roles.ts:28:3
+```
+
+**Impact:** `tests/unit.test.ts` imports `@/lib/permissions` before anything that
+pulls in `api-helpers`, so the suite could not load at all:
+`bun test tests/unit.test.ts` → `0 pass, 1 fail`, and since that file is
+registered in `scripts/run-tests.ts`, **`bun run test` and CI failed** with the
+27 security assertions never executed. The same crash would 500 any route,
+script or worker chunk whose import list reaches `@/lib/permissions` before
+`@/lib/api-helpers`; today all 204 route modules happen to import `api-helpers`
+first, which is why the app itself still boots.
+
+**Evidence (reproduced on the unfixed tree, bun 1.3.14 — the CI version):**
+
+| Command | Unfixed | Fixed |
+|---|---|---|
+| `bun test tests/unit.test.ts` | 0 pass, 1 fail (TDZ `ReferenceError`) | 27 pass, 0 fail |
+| `bun -e "await import('@/lib/permissions')"` | `ReferenceError: Cannot access 'PERMISSIONS' before initialization` | `PERMISSIONS.length = 88` |
+| `bun test tests/import-cycle-regression.test.ts` | 0 pass, 4 fail | 4 pass, 0 fail |
+
+**Fix:** the catalog is read on first use instead of at module scope
+(`allowedCustomRolePermissions()`), so no cyclic binding is dereferenced during
+module initialization. The allowlist contents and the reserved-permission
+refusals are unchanged (`SUPER_ADMIN_ACCESS`, `BILL_REFUND`, `TAX_MANAGE`, …
+still cannot be granted).
+
+**Regression tests:** `tests/import-cycle-regression.test.ts` (registered in
+`scripts/run-tests.ts`) — loads the cycle with `permissions.ts` first in a child
+process, asserts the allowlist still refuses reserved permissions, guards
+against a module-scope read coming back, and sweeps every `src/lib` module in a
+fresh process so any future TDZ cycle fails the build.
 
 ---
 
