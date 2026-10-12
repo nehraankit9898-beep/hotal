@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 import { jsonError } from "@/lib/api-helpers";
+import { limitPaymentLinkRequest } from "@/lib/payment-link-limit";
 
 type Ctx = { params: Promise<{ token: string }> };
 
@@ -9,6 +10,8 @@ type Ctx = { params: Promise<{ token: string }> };
  * bills, never customer personal data. Public read-only and cheap.
  */
 export async function GET(req: Request, ctx: Ctx) {
+  const limited = await limitPaymentLinkRequest(req, "read");
+  if (limited) return limited;
   const { token } = await ctx.params;
   const link = await db.paymentLink.findUnique({
     where: { token },

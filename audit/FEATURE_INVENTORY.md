@@ -1,3 +1,29 @@
+# Feature inventory — current pass (2026-10-12)
+
+The older detailed per-module inventory is `audit/FEATURE_INVENTORY.md` (historical, superseded by this file for status). Routes: `audit/ROUTE_INVENTORY.md`. In this table **PARTIAL** means only a component or some paths were inspected; **NOT TESTED** means no adequate live verification. Every listed feature has API/service/schema paths in the prior inventory; below are the primary current entry points and verification methods. UI presence does not imply a complete feature.
+
+| Feature | Real entry points and dependencies | UI/API/service/DB evidence | Status / verification |
+|---|---|---|---|
+| Authentication, MFA, recovery | `src/app/api/auth/*`, `src/app/api/mfa/*`, `src/lib/auth.ts`, `src/lib/api-helpers.ts`, `User`, `ActivationToken` | Pages/routes and token+DB checks exist; DB test blocked | PARTIAL; DB-free hashing/CSP tests PASS, live API NOT TESTED |
+| Hotel onboarding, branches, staff | `src/app/api/auth/register`, `src/app/api/branches/*`, `src/app/api/staff/*`, `src/lib/staff-guards.ts`, `Hotel`, `User`, `BranchMembership` | Routes and UI source exist; live tenant/branch testing blocked | PARTIAL |
+| Custom roles | `src/app/api/custom-roles/*`, `src/lib/custom-roles.ts`, `src/lib/permissions.ts`, `CustomRole`, `CustomRoleAssignment` | Before: grants inert. After: DB-resolution wired in `requireAuth`, restricted high-risk grants, update/revoke API. DB-backed verification blocked | PARTIAL (unit mock PASS; integration BLOCKED) |
+| CRM, consent, imports/exports | `src/app/api/customers/*`, `src/app/api/imports/*`, `src/lib/import.ts`, `Customer` | UI/API/services exist; send-time consent/import/export behavior not executed | NOT TESTED |
+| Campaigns, messaging, journeys | `src/app/api/campaigns/*`, `src/lib/campaigns.ts`, `src/lib/providers/*`, `scripts/worker.ts` | Providers need credentials; no messages sent | BLOCKED (delivery); remaining workflow NOT TESTED |
+| Menu, tables, orders, KDS, reservations | `src/app/api/menu/*`, `tables/*`, `orders/*`, `kds/*`, `reservations/*`, `src/lib/orders.ts`, `src/lib/reservations.ts` | UI/API/services/schema present; no live DB/browser | NOT TESTED |
+| Billing, payments, refunds, tax | `src/app/api/bills/*`, `pay/[token]/*`, `webhooks/razorpay-restaurant`, `src/lib/billing.ts`, `Bill`, `Payment` | API exists; public payment-link limiter unit PASS; gateway unverified | PARTIAL, sandbox BLOCKED |
+| Inventory, attendance, shifts | `src/app/api/inventory/*`, `attendance/*`, `shifts/*`, `src/lib/inventory.ts`, `Ingredient`, `StockLedger` | Source exists; database paths NOT TESTED | NOT TESTED |
+| Loyalty, coupons, SaaS plans | `src/app/api/loyalty/*`, `coupons/*`, `super-admin/plans/*`, `src/lib/saas/*`, `Subscription` | Source exists; provider and financial effects unverified | NOT TESTED |
+| Analytics, AI, platform administration | `src/app/api/analytics/*`, `ai/*`, `super-admin/*`, `src/lib/super-admin.ts` | Auth source reviewed; live admin navigation and tenant reports unverified | PARTIAL |
+| Notifications, webhooks, jobs | `src/app/api/notifications`, `webhooks/*`, `src/lib/queue.ts`, `scripts/worker.ts` | Worker/provider delivery unverified | NOT TESTED |
+| Backups, restore, monitoring | `src/lib/saas/backup.ts`, `scripts/restore-backup.ts`, `src/app/api/health/*` | Docs/scripts exist, no restore or health probe executed | BLOCKED |
+| Frontend (dashboard/public) | `src/app/**/page.tsx`, `src/components/app/*` | 8 page files and component views; no browser automation run | NOT TESTED |
+
+For individual routes' auth/tenant *static* presence use `audit/ROUTE_INVENTORY.md`; do not interpret it as a proven isolation test. No UI was redesigned, and no external integration was asserted operational.
+
+---
+
+# Historical inventory (2026-10-11; superseded for status by addendum above)
+
 # Feature Inventory — StayLoop (2026-10-11)
 
 Derived from source (`src/app/api/**/route.ts`, `src/app/**/page.tsx`, `src/components/app/*-view.tsx`, `src/lib/*.ts`),

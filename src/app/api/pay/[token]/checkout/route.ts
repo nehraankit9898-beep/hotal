@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
 import { jsonError, readJson } from "@/lib/api-helpers";
 import { restaurantGatewayCredentials } from "@/lib/billing";
+import { limitPaymentLinkRequest } from "@/lib/payment-link-limit";
 
 type Ctx = { params: Promise<{ token: string }> };
 
@@ -11,6 +12,8 @@ type Ctx = { params: Promise<{ token: string }> };
  * honest 423 (never a fake "paid" path).
  */
 export async function POST(req: Request, ctx: Ctx) {
+  const limited = await limitPaymentLinkRequest(req, "checkout");
+  if (limited) return limited;
   const { token } = await ctx.params;
   const body = await readJson(req).catch(() => ({}));
   void body;

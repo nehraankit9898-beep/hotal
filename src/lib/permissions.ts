@@ -454,8 +454,18 @@ export const ROLE_PERMISSIONS: Record<AuthedUser["role"], Permission[]> = {
   WAITER: WAITER,
 };
 
-/** Does the user hold the permission? Server-side only. */
-export function hasPermission(user: Pick<AuthedUser, "role">, permission: Permission): boolean {
+/**
+ * Server-side authorization. requireAuth supplies a fresh DB-resolved permission
+ * set on each request. The role-only form remains for legacy matrix checks;
+ * it cannot grant custom permissions and must not be used with client data.
+ */
+export function hasPermission(
+  user: Pick<AuthedUser, "role"> & { permissions?: readonly Permission[] },
+  permission: Permission,
+): boolean {
+  if (user.permissions !== undefined) {
+    return Array.isArray(user.permissions) && user.permissions.includes(permission);
+  }
   return ROLE_PERMISSIONS[user.role]?.includes(permission) ?? false;
 }
 
@@ -465,7 +475,7 @@ export function hasPermission(user: Pick<AuthedUser, "role">, permission: Permis
  *   const denied = requirePermission(auth.user, "CAMPAIGN_SEND"); if (denied) return denied;
  */
 export function requirePermission(
-  user: Pick<AuthedUser, "role">,
+  user: Pick<AuthedUser, "role"> & { permissions?: readonly Permission[] },
   permission: Permission,
 ): ReturnType<typeof jsonError> | null {
   if (!hasPermission(user, permission)) {

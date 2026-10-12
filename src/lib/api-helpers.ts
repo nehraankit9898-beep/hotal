@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { readJsonCapped } from "@/lib/body";
 import { db } from "@/lib/db";
+import { resolveUserPermissions } from "@/lib/custom-roles";
+import type { Permission } from "@/lib/permissions";
 import { getSession, getSessionAuth, SessionPayload } from "@/lib/auth";
 import { assertCsrf, isStateChanging } from "@/lib/csrf";
 import { isMaintenanceMode } from "@/lib/saas/settings";
@@ -48,6 +50,8 @@ export interface AuthedUser {
   hotelName: string;
   mustChangePassword: boolean;
   mfaSetupRequired: boolean;
+  /** DB-resolved on every authenticated request; never read from the client. */
+  permissions?: readonly Permission[];
 }
 
 export function jsonError(message: string, status = 400, code = "BAD_REQUEST") {
@@ -230,6 +234,10 @@ export async function requireAuth(
       };
     }
   }
+
+  // No cross-request cache: a changed/deactivated role or removed assignment
+  // takes effect at the next request. A DB read failure fails the request closed.
+  user.permissions = await resolveUserPermissions(user);
 
   // Phase 10 — API request metering (best-effort, never blocks the request).
   if (dbUser.hotelId) {

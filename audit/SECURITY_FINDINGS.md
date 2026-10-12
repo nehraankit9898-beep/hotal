@@ -1,3 +1,21 @@
+# Security findings — 2026-10-12 addendum
+
+Historical detailed review: `audit/SECURITY_FINDINGS.md` (older audit; dates/results differ). Findings below are for this checkout.
+
+| ID / severity / locations | Reproduction, root cause, fix, regression, residual risk |
+|---|---|
+| FUNC-001 / High / `src/lib/custom-roles.ts:65-98`, `src/lib/api-helpers.ts:240`, `src/lib/permissions.ts:460-483` | Existing static-only `requirePermission` ignored custom assignments. Added fresh same-tenant role resolution to every `requireAuth` result, no cross-request cache; malformed/inactive/foreign role ignored. `bun test tests/custom-role-resolution.test.ts`: 3 PASS mocked-delegate tests. DB-backed `tests/custom-role-api.test.ts` BLOCKED; no production claim. |
+| ROLE-002 / High / `src/lib/custom-roles.ts:21-29,44-60,164-175` | Prior validator allowed owner to mint `STAFF_MANAGE`, `BILL_VOID`, `CUSTOM_ROLE_MANAGE` and similar sensitive rights via custom role. New reserved allowlist is applied both at create/update/assign and runtime resolution (including old stored roles); active target and same hotel required. Regression: mocked-delegate test PASS. Historical custom roles with reserved grants lose those grants; migrate users needing them to supervised system roles. Full cross-tenant integration BLOCKED. |
+| SEC-007 / Low / `src/lib/payment-link-limit.ts`, `src/app/api/pay/[token]/*` | Public read/checkout/verify had no rate limiter. Limits: 60/10/30 requests per IP per minute respectively, 429 with Retry-After; keys use proxy-derived IP. `bun test tests/payment-link-limit.test.ts`: 1 PASS. Multi-instance Redis behavior BLOCKED; without Redis limiter is per-process. |
+| PAY-001 / High / `src/app/api/pay/[token]/verify/route.ts` final update | Payment capture succeeds, then `paymentLink.update(...).catch(() => undefined)` can return 200 while link state stays ACTIVE. Source trace only; no gateway sandbox or transaction test. NOT FIXED: needs transactional reconciliation with provider-capture path, safe retry semantics and tests before release. |
+| DEP-002 / High / `bun.lock` | `bun audit --audit-level=high`: 26 high advisories. No blanket upgrade or unreviewed dependency changes applied. Dependency triage required. |
+
+Authentication/MFA, all 204 routes, browser navigation, distributed revocation and payment provider signatures have **not** been dynamically audited this pass. Existing historical findings must not be treated as current PASS.
+
+---
+
+# Historical findings (2026-10-11; superseded for status by addendum above)
+
 # Security Findings — StayLoop audit (2026-10-11)
 
 Branch: `arena/4731a2f4-hotal` · Base: `b398b81` (main)
