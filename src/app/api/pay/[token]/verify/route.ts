@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
 import { jsonError, readJson } from "@/lib/api-helpers";
 import { verifyGatewaySignature, restaurantGatewayCredentials, recordGatewayCapture } from "@/lib/billing";
+import { limitPaymentLinkRequest } from "@/lib/payment-link-limit";
 
 type Ctx = { params: Promise<{ token: string }> };
 
@@ -10,6 +11,8 @@ type Ctx = { params: Promise<{ token: string }> };
  * to the link; allocation idempotent via gatewayPaymentId fence.
  */
 export async function POST(req: Request, ctx: Ctx) {
+  const limited = await limitPaymentLinkRequest(req, "verify");
+  if (limited) return limited;
   const { token } = await ctx.params;
   const body = await readJson(req);
   const gatewayOrderId = typeof body?.gatewayOrderId === "string" ? body.gatewayOrderId : "";

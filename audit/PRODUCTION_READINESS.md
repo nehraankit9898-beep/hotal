@@ -1,3 +1,5 @@
+> **Historical snapshot (2026-10-11).** For this checkout, see [FINAL_VERIFICATION_REPORT.md](FINAL_VERIFICATION_REPORT.md), [REPAIR_CHANGELOG.md](REPAIR_CHANGELOG.md) and [REMAINING_BLOCKERS.md](REMAINING_BLOCKERS.md). Statements below describe the earlier audit, not the post-repair result.
+
 # Production Readiness and Release Verdict — StayLoop (2026-10-11)
 
 **Verdict: StayLoop is NOT ready for real customers based on this audit.** The fixes above remove several confirmed

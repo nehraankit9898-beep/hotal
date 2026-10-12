@@ -6,12 +6,9 @@
  * platform privileges are never tenant-defined. Changes apply server-side
  * immediately; sessions are revoked where necessary by bumping tokenVersion.
  *
- * The system legacy roles (HOTEL_OWNER/HOTEL_MANAGER/etc.) are STILL the
- * primary RBAC. Custom roles add ADDITIONAL permissions on top — they
- * cannot REMOVE permissions from the legacy role. So a CASHIER with an
- * additional "INVENTORY_READ" custom-role assignment can read inventory,
- * but a CASHIER with no custom role still cannot. This avoids the
- * "owner grants SUPER_ADMIN_ACCESS via custom role" escalation attack.
+ * System roles remain the baseline: custom roles add permissions, never
+ * subtract them. Platform and sensitive owner/admin operations are excluded
+ * from custom grants, including for roles persisted before this policy.
  */
 import { db } from "@/lib/db";
 import { PERMISSIONS, type Permission } from "@/lib/permissions";
@@ -19,7 +16,17 @@ import type { AuthedUser } from "@/lib/api-helpers";
 import { logAudit } from "@/lib/audit";
 
 /** Allowlist of permissions that may be assigned via custom roles. */
-const ALLOWED_CUSTOM_PERMISSIONS = new Set<Permission>(PERMISSIONS);
+// Defense in depth: ordinary custom roles must not mint platform or account /
+// financial administration privileges. These remain governed by system roles.
+const RESERVED_PERMISSIONS = new Set<Permission>([
+  "SUPER_ADMIN_ACCESS", "CUSTOM_ROLE_MANAGE", "STAFF_MANAGE", "SETTINGS_MANAGE",
+  "INTEGRATION_MANAGE", "BRANCH_MANAGE", "FRANCHISE_MANAGE", "WHITE_LABEL_MANAGE",
+  "ENTERPRISE_API_MANAGE", "WEBHOOK_MANAGE", "PRIVACY_REQUEST_MANAGE",
+  "BILL_REFUND", "BILL_VOID", "TAX_MANAGE", "AUDIT_LOG_READ",
+]);
+const ALLOWED_CUSTOM_PERMISSIONS = new Set<Permission>(
+  PERMISSIONS.filter((p) => !RESERVED_PERMISSIONS.has(p)),
+);
 
 /**
  * Validate that all requested permissions are in the allowlist AND that the
@@ -34,14 +41,8 @@ export function validateCustomRolePermissions(
 ): { ok: true; permissions: Permission[] } | { ok: false; error: string } {
   const result: Permission[] = [];
   for (const raw of requested) {
-    if (raw === "SUPER_ADMIN_ACCESS") {
-      return {
-        ok: false,
-        error: "SUPER_ADMIN_ACCESS cannot be granted via custom roles.",
-      };
-    }
     if (!ALLOWED_CUSTOM_PERMISSIONS.has(raw as Permission)) {
-      return { ok: false, error: `Unknown permission: ${raw}` };
+      return { ok: false, error: `Permission cannot be granted via custom roles: ${raw}` };
     }
     // Owner can only assign permissions they themselves hold.
     if (callerRole !== "SUPER_ADMIN" && !callerPermissions.includes(raw as Permission)) {
@@ -57,11 +58,9 @@ export function validateCustomRolePermissions(
 }
 
 /**
- * Resolve the union of legacy role permissions + custom-role permissions for
- * a user. Called by hasPermission when evaluating custom roles.
- *
- * NOTE: this function must be cheap — it's called on every permission check.
- * In production, wrap with a per-request cache (LRU) keyed by userId+updatedAt.
+ * Resolve the union of system role and active same-tenant custom assignments.
+ * requireAuth calls this once per request after checking the authoritative
+ * account/hotel. Do not cache across requests: revocation must be immediate.
  */
 export async function resolveUserPermissions(
   user: AuthedUser,
@@ -74,7 +73,7 @@ export async function resolveUserPermissions(
 
   // Look up active custom-role assignments for this user.
   const assignments = await db.customRoleAssignment.findMany({
-    where: { userId: user.userId, customRole: { active: true, hotelId: user.hotelId } },
+    where: { userId: user.userId, customRole: { active: true, hotelId: user.hotelId, isSystemRole: false } },
     select: { customRole: { select: { permissions: true } } },
   });
   if (assignments.length === 0) return base;
@@ -84,7 +83,7 @@ export async function resolveUserPermissions(
       const parsed = JSON.parse(a.customRole.permissions);
       if (Array.isArray(parsed)) {
         for (const p of parsed) {
-          if (ALLOWED_CUSTOM_PERMISSIONS.has(p as Permission)) {
+          if (typeof p === "string" && ALLOWED_CUSTOM_PERMISSIONS.has(p as Permission)) {
             extra.add(p as Permission);
           }
         }
@@ -139,8 +138,9 @@ export async function createCustomRole(
       metadata: { name, permissions: validation.permissions },
     });
     return { ok: true, id: role.id };
-  } catch (e) {
-    return { ok: false, error: (e as Error).message };
+  } catch {
+    // Never disclose ORM errors or constraint details to an API caller.
+    return { ok: false, error: "Unable to save custom role change.", status: 500 };
   }
 }
 
@@ -162,11 +162,17 @@ export async function assignCustomRole(
     return { ok: false, error: "Forbidden", status: 403 };
   }
   const role = await db.customRole.findFirst({
-    where: { id: customRoleId, hotelId: user.hotelId, active: true },
+    where: { id: customRoleId, hotelId: user.hotelId, active: true, isSystemRole: false },
   });
   if (!role) return { ok: false, error: "Custom role not found.", status: 404 };
+  let grants: unknown;
+  try { grants = JSON.parse(role.permissions); } catch { /* fail closed */ }
+  if (!Array.isArray(grants) || grants.some((p) => typeof p !== "string") ||
+      !validateCustomRolePermissions(grants, user.role, callerPermissions).ok) {
+    return { ok: false, error: "Custom role contains invalid or ungrantable permissions.", status: 403 };
+  }
   const target = await db.user.findFirst({
-    where: { id: targetUserId, hotelId: user.hotelId },
+    where: { id: targetUserId, hotelId: user.hotelId, status: "ACTIVE" },
     select: { id: true, role: true },
   });
   if (!target) return { ok: false, error: "Target user not found.", status: 404 };
@@ -191,7 +197,8 @@ export async function assignCustomRole(
       metadata: { customRoleId, customRoleName: role.name },
     });
     return { ok: true };
-  } catch (e) {
-    return { ok: false, error: (e as Error).message };
+  } catch {
+    // Never disclose ORM errors or constraint details to an API caller.
+    return { ok: false, error: "Unable to save custom role change.", status: 500 };
   }
 }

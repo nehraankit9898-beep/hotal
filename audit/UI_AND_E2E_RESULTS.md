@@ -1,0 +1,3 @@
+# UI and E2E results — 2026-10-12
+
+8 `src/app/**/page.tsx` files and `src/components/app/*` present; no browser/Playwright run or accessibility scan. DB engine prevented server from starting and there is no verified preview. Custom-role UI not found by `rg 'custom-roles|customRole' src/app src/components` (only API handlers): assignment/edit/revoke are API-only this pass. Fonts in `src/app/layout.tsx` now self-hosted OFL Geist; `bun run build` compiles UI but fails TypeScript due missing Prisma client. Result: UI flow, navigation, keyboard, mobile, accessibility and payment browser flow all **NOT TESTED**. Do not infer feature completeness from compile.
