@@ -286,6 +286,11 @@ async function main() {
       "tests/payment-link-limit.test.ts",
       "tests/payment-link-settle.test.ts",
       "tests/payment-callback-routes.test.ts",
+      // Module-load order in the RBAC import cycle: loading
+      // @/lib/permissions first used to throw a TDZ ReferenceError, which is
+      // what stopped tests/unit.test.ts (and therefore `bun run test`) from
+      // running at all.
+      "tests/import-cycle-regression.test.ts",
     ];
     const unregistered = readdirSync(join(ROOT, "tests"))
       .filter((f) => f.endsWith(".test.ts"))
