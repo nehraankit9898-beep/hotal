@@ -353,6 +353,43 @@ export interface CreatedBill {
 }
 
 /**
+ * Is a promotion's day/time window open at `now` in the tenant timezone?
+ *
+ * BUG FIX: days are stored as "MON".."SUN" (promotions API + UI) but were
+ * compared with Intl's "Mon".."Sun", so a promotion restricted to ANY day of
+ * the week never applied. Compared case-insensitively now.
+ */
+export function promotionWindowOpen(
+  promo: { type: string; daysOfWeek: string | null; startTime: string | null; endTime: string | null },
+  now: Date,
+  tz: string,
+): boolean {
+  const local = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz, weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(now);
+  const get = (t: string) => local.find((p) => p.type === t)?.value ?? "";
+  const weekday = get("weekday").toUpperCase();
+  const minutesOfDay = (Number(get("hour")) % 24) * 60 + Number(get("minute"));
+  if (promo.daysOfWeek) {
+    try {
+      const days = JSON.parse(promo.daysOfWeek) as unknown;
+      if (Array.isArray(days) && days.length > 0 && !days.some((d) => String(d).toUpperCase() === weekday)) return false;
+    } catch {
+      return false; // malformed window — never apply
+    }
+  }
+  if (promo.type === "HAPPY_HOUR") {
+    if (!promo.startTime || !promo.endTime) return false;
+    const toMin = (s: string) => Number(s.slice(0, 2)) * 60 + Number(s.slice(3, 5));
+    const start = toMin(promo.startTime);
+    const end = toMin(promo.endTime);
+    const inWindow = start <= end ? minutesOfDay >= start && minutesOfDay < end : minutesOfDay >= start || minutesOfDay < end;
+    if (!inWindow) return false;
+  }
+  return true;
+}
+
+/**
  * Create a bill from a table session's SERVED (or at least placed) orders.
  * Pricing snapshot comes from the immutable OrderItem snapshots — the catalog
  * cannot rewrite history. Coupon redemption happens transactionally.
@@ -519,34 +556,13 @@ export async function createBillFromSession(input: CreateBillInput): Promise<Cre
   const promotionRows = await db.promotion.findMany({ where: { hotelId, active: true } });
   const appliedPromotion: { id: string; name: string; version: number; label: string; discount: number } | null = (() => {
     const tz = hotel?.timezone || "Asia/Kolkata";
-    const local = new Intl.DateTimeFormat("en-US", {
-      timeZone: tz, weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false,
-    }).formatToParts(nowForPromo);
-    const get = (t: string) => local.find((p) => p.type === t)?.value ?? "";
-    const weekday = get("weekday");
-    const minutesOfDay = (Number(get("hour")) % 24) * 60 + Number(get("minute"));
     const candidates: Array<{ row: (typeof promotionRows)[number]; discount: number }> = [];
     for (const promo of promotionRows) {
       if (couponCode && !promo.stackable) continue;
       if (promo.startDate && promo.startDate > nowForPromo) continue;
       if (promo.endDate && promo.endDate <= nowForPromo) continue;
       if (promo.type === "COMBO") continue; // needs a combo contract — never applied silently
-      if (promo.daysOfWeek) {
-        try {
-          const days = JSON.parse(promo.daysOfWeek) as string[];
-          if (Array.isArray(days) && days.length > 0 && !days.includes(weekday)) continue;
-        } catch {
-          continue; // malformed window — never apply
-        }
-      }
-      if (promo.type === "HAPPY_HOUR") {
-        if (!promo.startTime || !promo.endTime) continue;
-        const toMin = (s: string) => Number(s.slice(0, 2)) * 60 + Number(s.slice(3, 5));
-        const start = toMin(promo.startTime);
-        const end = toMin(promo.endTime);
-        const inWindow = start <= end ? minutesOfDay >= start && minutesOfDay < end : minutesOfDay >= start || minutesOfDay < end;
-        if (!inWindow) continue;
-      }
+      if (!promotionWindowOpen(promo, nowForPromo, tz)) continue;
       // Scope: which lines does this promotion cover?
       let itemIds: string[] = [];
       let categoryIds: string[] = [];

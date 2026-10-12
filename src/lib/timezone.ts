@@ -72,12 +72,32 @@ function zoneOffsetMs(instant: Date, tz: string): number {
   return wallAsUtc - instantSeconds;
 }
 
-/** The instant at which the hotel's local calendar day containing `date` begins. */
-export function startOfZonedDay(date: Date, tz: string): Date {
-  const [y, m, d] = zonedDayKey(date, tz).split("-").map(Number);
+/** The instant local midnight begins on calendar day (y, m, d) in `tz`. */
+function zonedMidnight(y: number, m: number, d: number, tz: string): Date {
   const midnightUtc = Date.UTC(y, m - 1, d);
   // Two passes handle a DST transition inside the day.
   const first = midnightUtc - zoneOffsetMs(new Date(midnightUtc), tz);
   const second = midnightUtc - zoneOffsetMs(new Date(first), tz);
   return new Date(second);
+}
+
+/** The instant at which the hotel's local calendar day containing `date` begins. */
+export function startOfZonedDay(date: Date, tz: string): Date {
+  const [y, m, d] = zonedDayKey(date, tz).split("-").map(Number);
+  return zonedMidnight(y, m, d, tz);
+}
+
+/**
+ * UTC bounds [start, end) of the local business day `dateStr` ("YYYY-MM-DD")
+ * in `tz` — 24h normally, 23h/25h across DST changes.
+ *
+ * BUG FIX: the sales report and the owner daily report each carried a copy of
+ * a helper that derived the "offset" from the calendar DATE alone, so every
+ * timezone got the same window: 12:00 UTC on the day to 23:59 UTC the next
+ * day (36h). Morning sales went missing and consecutive days double-counted.
+ */
+export function zonedDayBounds(dateStr: string, tz: string): { start: Date; end: Date } {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  // Date.UTC normalises day overflow (Jan 31 + 1 → Feb 1).
+  return { start: zonedMidnight(y, m, d, tz), end: zonedMidnight(y, m, d + 1, tz) };
 }

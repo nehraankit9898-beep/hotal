@@ -160,6 +160,10 @@ export async function POST(req: Request) {
           customerName: contactName,
         });
         if (result.body) {
+          // Diagnostics mirror of the reply (documented response contract).
+          // BUG FIX: nothing was ever pushed here after replies moved to the
+          // provider pipeline, so `replies` was always empty.
+          replies.push({ phone: message.from, reply: result.body });
           // BUG FIX: the reply used to be returned as JSON, which Meta ignores,
           // so customers never received the chatbot's answer. Send it through
           // the tenant's own WhatsApp provider (same pipeline as campaigns).

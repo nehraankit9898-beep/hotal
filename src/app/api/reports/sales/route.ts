@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
 import { requireAuth, serverError } from "@/lib/api-helpers";
 import { requirePermission } from "@/lib/permissions";
+import { isValidTimeZone, zonedDayBounds } from "@/lib/timezone";
 
 /**
  * Phase 14 — POS day summary (MVP report #6).
@@ -10,33 +11,6 @@ import { requirePermission } from "@/lib/permissions";
  * timezone (Hotel.timezone), stored UTC. All figures reconcile against
  * invoices/payment allocations/refunds — not against clicks or taps.
  */
-function localDayBounds(dateStr: string, tz: string): { start: Date; end: Date } {
-  // Compute the UTC instants of [local midnight, next local midnight) using
-  // Intl to stay correct across DST without external libraries.
-  const fmt = new Intl.DateTimeFormat("en-CA", {
-    timeZone: tz,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
-  const guessOffset = (at: Date): number => {
-    const parts = fmt.formatToParts(at);
-    const y = Number(parts.find((p) => p.type === "year")?.value);
-    const m = Number(parts.find((p) => p.type === "month")?.value);
-    const d = Number(parts.find((p) => p.type === "day")?.value);
-    const asUTC = Date.UTC(y, m - 1, d);
-    return asUTC - Math.floor(at.getTime() / 1000) * 1000;
-  };
-  const [y, m, d] = dateStr.split("-").map(Number);
-  const utcGuess = Date.UTC(y, m - 1, d, 12, 0, 0);
-  const offset = guessOffset(new Date(utcGuess));
-  const startMs = Date.UTC(y, m - 1, d) - offset;
-  const endOffset = guessOffset(new Date(startMs + 24 * 3600_000 - 60_000));
-  const start = new Date(startMs);
-  const end = new Date(startMs + 24 * 3600_000 - endOffset + (endOffset === offset ? 0 : 0));
-  return { start, end };
-}
-
 export async function GET(req: Request) {
   try {
     const auth = await requireAuth(req);
@@ -47,13 +21,16 @@ export async function GET(req: Request) {
     const url = new URL(req.url);
     const hotel = await db.hotel.findUnique({ where: { id: auth.user.hotelId }, select: { timezone: true } });
     const tz = url.searchParams.get("tz") || hotel?.timezone || "Asia/Kolkata";
+    if (!isValidTimeZone(tz)) {
+      return Response.json({ error: "tz must be a valid IANA timezone" }, { status: 422 });
+    }
     // Default: today in the tenant timezone.
     const todayLocal = new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(new Date());
     const dateStr = url.searchParams.get("date") || todayLocal;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
       return Response.json({ error: "date must be YYYY-MM-DD" }, { status: 422 });
     }
-    const { start, end } = localDayBounds(dateStr, tz);
+    const { start, end } = zonedDayBounds(dateStr, tz);
 
     const [bills, payments, refunds] = await Promise.all([
       db.bill.findMany({

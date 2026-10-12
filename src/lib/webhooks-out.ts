@@ -50,18 +50,84 @@ export function generateEventId(): string {
 }
 
 /**
+ * True for a hostname / IP literal that must never receive webhook traffic in
+ * production: loopback, private (RFC 1918 / ULA), link-local (incl. the cloud
+ * metadata address 169.254.169.254), CGNAT, multicast/reserved, unspecified,
+ * and local-only names. Expects WHATWG-URL-normalised input (`URL.hostname`
+ * or a resolved address); a public DNS name returns false here and is
+ * re-checked against its resolved addresses at delivery time.
+ */
+export function isBlockedWebhookHost(hostname: string): boolean {
+  let h = hostname.trim().toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (!h) return true;
+  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal")) return true;
+  // IPv4-mapped IPv6 — dotted (::ffff:10.0.0.1) or URL-normalised hex (::ffff:a00:1).
+  const dottedMapped = h.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (dottedMapped) h = dottedMapped[1];
+  const hexMapped = h.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (hexMapped) {
+    const hi = parseInt(hexMapped[1], 16);
+    const lo = parseInt(hexMapped[2], 16);
+    h = `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+  }
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(h)) {
+    const [a, b, c] = h.split(".").map(Number);
+    return (
+      a === 0 || a === 10 || a === 127 ||
+      (a === 100 && b >= 64 && b <= 127) || // CGNAT
+      (a === 169 && b === 254) || // link-local / cloud metadata
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 192 && b === 0 && c === 0) ||
+      (a === 198 && (b === 18 || b === 19)) ||
+      a >= 224 // multicast + reserved + broadcast
+    );
+  }
+  if (h.includes(":")) {
+    if (h === "::" || h === "::1") return true;
+    const first = parseInt(h.split(":")[0] || "0", 16);
+    return (
+      (first & 0xfe00) === 0xfc00 || // fc00::/7 unique-local
+      (first & 0xffc0) === 0xfe80 || // fe80::/10 link-local
+      (first & 0xff00) === 0xff00 // ff00::/8 multicast
+    );
+  }
+  return false;
+}
+
+/**
  * Validate the endpoint URL. Only https: is allowed in production. Loopback
  * is allowed in dev/test for contract tests (marked CONTRACT_TEST).
+ *
+ * SECURITY FIX: production previously accepted ANY https host, including
+ * loopback, private-network and link-local addresses — a tenant admin could
+ * point deliveries at the platform's internal network (SSRF).
  */
 export function validateWebhookUrl(url: string, isProduction: boolean): boolean {
   try {
     const u = new URL(url);
     if (isProduction && u.protocol !== "https:") return false;
     if (!["https:", "http:"].includes(u.protocol)) return false;
+    if (isProduction && isBlockedWebhookHost(u.hostname)) return false;
     return true;
   } catch {
     return false;
   }
+}
+
+/**
+ * Production delivery-time destination check: the endpoint URL must still
+ * validate (endpoints saved before host validation existed) and its hostname
+ * must not resolve to a blocked address. Returns the reason, or null if OK.
+ * DNS failures throw and are retried like any transport error.
+ */
+async function blockedDestination(url: string): Promise<string | null> {
+  if (!validateWebhookUrl(url, true)) return "destination not allowed (must be a public https URL)";
+  const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
+  const { lookup } = await import("dns/promises");
+  const addresses = await lookup(host, { all: true });
+  const blocked = addresses.find((a) => isBlockedWebhookHost(a.address));
+  return blocked ? `destination resolves to a non-public address (${blocked.address})` : null;
 }
 
 interface Endpoint {
@@ -139,6 +205,16 @@ export async function deliverWebhook(
   }
   const attempt = delivery.attempt + 1;
   try {
+    if (process.env.NODE_ENV === "production") {
+      const blocked = await blockedDestination(delivery.endpoint.url);
+      if (blocked) {
+        await db.webhookDelivery.update({
+          where: { id: deliveryId },
+          data: { attempt, status: "DEAD", responseStatus: null, responseSnippet: blocked },
+        });
+        return { ok: false, error: "destination blocked, dead-lettered" };
+      }
+    }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10_000);
     const res = await fetch(delivery.endpoint.url, {
@@ -151,6 +227,11 @@ export async function deliverWebhook(
       },
       body: delivery.payload,
       signal: controller.signal,
+      // SECURITY FIX: fetch followed redirects by default, so the 3xx branch
+      // below was unreachable and an endpoint could bounce the delivery to
+      // any URL — including http:// internal services such as the cloud
+      // metadata endpoint. Redirects are now returned and dead-lettered.
+      redirect: "manual",
     });
     clearTimeout(timeout);
     const snippet = await res.text().catch(() => "");
@@ -260,7 +341,7 @@ export async function createWebhookEndpoint(
   events: string[],
 ): Promise<{ ok: true; id: string; secret: string } | { ok: false; error: string; status?: number }> {
   if (!validateWebhookUrl(url, process.env.NODE_ENV === "production")) {
-    return { ok: false, error: "Endpoint URL must be https: in production.", status: 422 };
+    return { ok: false, error: "Endpoint URL must be a public https: URL in production.", status: 422 };
   }
   if (events.length === 0) {
     return { ok: false, error: "Specify at least one event type to subscribe to.", status: 422 };

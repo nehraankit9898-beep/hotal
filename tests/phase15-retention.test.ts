@@ -161,6 +161,36 @@ describe("Phase 15 — referral program", () => {
     const thankYou = JSON.stringify(outcome.thankYou);
     expect(thankYou.includes("no_consent") || thankYou.includes("no_email")).toBe(true);
   });
+
+  test("thank-you email skipped for a customer who replied STOP", async () => {
+    // Regression: only marketingConsent was checked, but an inbound STOP
+    // reply sets optOut and leaves marketingConsent untouched.
+    const cust = await apiCall("POST", "/api/customers", {
+      jar,
+      body: {
+        name: "Stop Sita",
+        phone: `96000000${Math.floor(Math.random() * 90 + 10)}`,
+        email: `stop-${Date.now()}@p15.test`,
+        marketingConsent: true,
+        emailOptIn: true,
+      },
+    });
+    expect(cust.status).toBe(201);
+    const customerId = cust.body.customer?.id ?? cust.body.id;
+    const { db } = await import("../src/lib/db");
+    // Exactly what the inbound-STOP handler (webhooks/tracking) writes.
+    await db.customer.update({ where: { id: customerId }, data: { optOut: true } });
+
+    const { billId, totalMinor } = await makePaidBill(1);
+    const { runRestaurantBillPaid } = await import("../src/lib/retention");
+    const res = await runRestaurantBillPaid({
+      jobId: "t4", type: "RESTAURANT_BILL_PAID", hotelId,
+      createdBy: null,
+      payload: { billId, hotelId, customerId, totalMinor },
+    });
+    expect(res.ok).toBe(true);
+    expect((res.result as Record<string, unknown>).thankYou).toEqual({ skipped: "opted_out" });
+  });
 });
 
 describe("Phase 15 — promotions", () => {
@@ -185,6 +215,30 @@ describe("Phase 15 — promotions", () => {
 
     const badRate = await apiCall("POST", "/api/promotions", { jar, body: { name: "Too much", type: "PERCENT", percentBps: 20000 } });
     expect(badRate.status).toBe(422);
+  });
+
+  test("a promotion restricted to days of the week applies on a matching day", async () => {
+    // Regression: days are stored as "MON".."SUN" but were compared with
+    // Intl's "Mon".."Sun", so a day-restricted promotion never applied.
+    const promo = await apiCall("POST", "/api/promotions", {
+      jar,
+      body: { name: "P15 Every day 25%", type: "PERCENT", percentBps: 2500, daysOfWeek: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"] },
+    });
+    expect(promo.status).toBe(201);
+    try {
+      tableCounter += 1;
+      const t = await apiCall("POST", "/api/tables", { jar, body: { number: `P15D${tableCounter}${Date.now() % 1000}`, capacity: 2 } });
+      const s = await apiCall("POST", "/api/sessions", { jar, body: { tableId: t.body.table.id, guestName: "Days" } });
+      const sid = s.body.session?.id ?? s.body.id;
+      await apiCall("POST", "/api/orders", { jar, body: { tableSessionId: sid, cart: [{ menuItemId: itemId, quantity: 1 }] } });
+      const b = await apiCall("POST", "/api/bills", { jar, body: { tableSessionId: sid, idempotencyKey: `bill-days-${Date.now()}` } });
+      expect(b.status).toBe(201);
+      const bill = (await apiCall("GET", `/api/bills/${b.body.bill.id}`, { jar })).body.bill;
+      expect(bill.promotionId).toBe(promo.body.promotion.id);
+      expect(bill.discountMinor).toBe(5000); // 25% of 20000
+    } finally {
+      await apiCall("PATCH", `/api/promotions/${promo.body.promotion.id}`, { jar, body: { active: false } });
+    }
   });
 });
 
@@ -238,6 +292,23 @@ describe("Phase 15 — owner reports", () => {
     });
     expect(ok.status).toBe(200);
     expect(JSON.parse(ok.body.schedule.recipients)).toHaveLength(2);
+  });
+
+  test("POS sales report covers the tenant-local day (a bill paid now is included)", async () => {
+    // Regression: the window was derived from the calendar date alone →
+    // 12:00 UTC .. 23:59 UTC next day (36h) for every timezone.
+    await makePaidBill(1);
+    const r = await apiCall("GET", "/api/reports/sales", { jar });
+    expect(r.status).toBe(200);
+    const start = new Date(r.body.window.startUtc).getTime();
+    const end = new Date(r.body.window.endUtc).getTime();
+    expect(start).toBeLessThanOrEqual(Date.now());
+    expect(end).toBeGreaterThan(Date.now());
+    expect(end - start).toBe(24 * 3600_000); // Asia/Kolkata: no DST
+    expect(r.body.bills.count).toBeGreaterThanOrEqual(1);
+
+    const badTz = await apiCall("GET", "/api/reports/sales?tz=Not/AZone", { jar });
+    expect(badTz.status).toBe(422);
   });
 
   test("day report reconciles with the bills created in this suite", async () => {

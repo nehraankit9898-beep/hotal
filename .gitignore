@@ -21,7 +21,10 @@ db/*.db-journal
 coverage/
 out/
 build/
-backups/
+# Backup archives (repo-root default of BACKUP_DIR). Anchored: an unanchored
+# `backups/` also matched src/app/api/super-admin/backups/, so that route was
+# never committed.
+/backups/
 var/
 *.log
 dev.log

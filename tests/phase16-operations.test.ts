@@ -110,6 +110,32 @@ describe("Phase 16 — reservations", () => {
     });
     expect(tooBig.status).toBe(409); // conflict code covers validation errors
   });
+
+  test("a cancelled or no-show reservation frees its exact slot; an active one still blocks it", async () => {
+    // Regression: the (tableId, date, startTime) unique index also covered
+    // inactive reservations, so a cancelled slot could never be booked again.
+    const t = await apiCall("POST", "/api/tables", { jar, body: { number: "P16R2", capacity: 4 } });
+    expect(t.status).toBe(201);
+    const slot = { tableId: t.body.table.id, date: "2031-01-16", startTime: "20:00", durationMinutes: 90, partySize: 2 };
+
+    const first = await apiCall("POST", "/api/reservations", { jar, body: { ...slot, guestName: "Chandra", guestPhone: "9812345680" } });
+    expect(first.status).toBe(201);
+    const cancel = await apiCall("PATCH", "/api/reservations", {
+      jar,
+      body: { id: first.body.reservation.id, to: "CANCELLED", reason: "guest called" },
+    });
+    expect(cancel.status).toBe(200);
+
+    const rebook = await apiCall("POST", "/api/reservations", { jar, body: { ...slot, guestName: "Deepa", guestPhone: "9812345681" } });
+    expect(rebook.status).toBe(201);
+    const duplicate = await apiCall("POST", "/api/reservations", { jar, body: { ...slot, guestName: "Esha", guestPhone: "9812345682" } });
+    expect(duplicate.status).toBe(409);
+
+    const noShow = await apiCall("PATCH", "/api/reservations", { jar, body: { id: rebook.body.reservation.id, to: "NO_SHOW" } });
+    expect(noShow.status).toBe(200);
+    const third = await apiCall("POST", "/api/reservations", { jar, body: { ...slot, guestName: "Farah", guestPhone: "9812345683" } });
+    expect(third.status).toBe(201);
+  });
 });
 
 describe("Phase 16 — inventory & recipes", () => {
@@ -196,6 +222,33 @@ describe("Phase 16 — inventory & recipes", () => {
     // Re-receive blocked (already RECEIVED)
     const again = await apiCall("PATCH", "/api/inventory/purchase-orders", { jar, body: { id: poId, action: "RECEIVE" } });
     expect(again.status).toBe(422);
+  });
+
+  test("purchase order listing one ingredient on two lines receives both lines", async () => {
+    // Regression: the receipt fence is one ledger row per (ingredient, PO), so
+    // the first line fenced out the second — its quantity was never stocked.
+    const ing = await apiCall("POST", "/api/inventory/ingredients", {
+      jar,
+      body: { name: "P16 Tomato", unit: "GRAM", openingQty: 0, costPerUnitMinor: 4, lowStockThreshold: 0 },
+    });
+    expect(ing.status).toBe(201);
+    const tomatoId = ing.body.ingredient.id;
+    const po = await apiCall("POST", "/api/inventory/purchase-orders", {
+      jar,
+      body: { supplier: { name: "P16 Veg" }, lines: [{ ingredientId: tomatoId, qty: 5000, unitCostMinor: 4 }, { ingredientId: tomatoId, qty: 2000, unitCostMinor: 5 }] },
+    });
+    expect(po.status).toBe(201);
+    const poId = po.body.order.id;
+    expect((await apiCall("PATCH", "/api/inventory/purchase-orders", { jar, body: { id: poId, action: "SUBMIT" } })).status).toBe(200);
+    expect((await apiCall("PATCH", "/api/inventory/purchase-orders", { jar, body: { id: poId, action: "RECEIVE" } })).status).toBe(200);
+
+    const list = await apiCall("GET", "/api/inventory/ingredients", { jar });
+    const tomato = list.body.ingredients.find((i: { id: string }) => i.id === tomatoId);
+    expect(tomato.stockQty).toBe(7000);
+    const ledger = await apiCall("GET", `/api/inventory/ledger?ingredientId=${tomatoId}`, { jar });
+    const receipts = ledger.body.entries.filter((e: { reason: string; refId: string }) => e.reason === "PURCHASE" && e.refId === poId);
+    expect(receipts.length).toBe(1);
+    expect(receipts[0].qtyDelta).toBe(7000);
   });
 
   test("stock count: counted delta applies once", async () => {

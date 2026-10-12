@@ -22,6 +22,8 @@ import { sendEmailWithRetry } from "@/lib/providers/email";
 import { recordRestaurantVisit } from "@/lib/restaurant";
 import { qualifyReferralForBill } from "@/lib/referrals";
 import { consumeStockForBill } from "@/lib/inventory";
+import { zonedDayBounds } from "@/lib/timezone";
+import { channelConsentOk } from "@/lib/campaigns";
 import type { JobContext, JobOutcome } from "@/lib/jobs/handlers";
 
 const VISIT_REF_PREFIX = "billId:";
@@ -32,6 +34,33 @@ export const OWNER_REPORT_JOB = "OWNER_REPORT";
 /* ------------------------------------------------------------------ */
 /* RESTAURANT_BILL_PAID                                                */
 /* ------------------------------------------------------------------ */
+
+/**
+ * Why the bill thank-you / review-request email must NOT be sent to this
+ * customer (null = send). It is a marketing email ("Reply STOP to opt out"),
+ * so it uses the same EMAIL channel gate as every other marketing send:
+ * marketingConsent && emailOptIn && !optOut.
+ *
+ * BUG FIX: only marketingConsent was checked. An inbound "STOP" reply sets
+ * optOut but leaves marketingConsent untouched, and revoking only the email
+ * channel clears emailOptIn — both kinds of customer kept receiving this
+ * email after every paid bill.
+ */
+export function billThankYouSkipReason(
+  customer: {
+    email: string | null;
+    marketingConsent: boolean;
+    optOut: boolean;
+    whatsappOptIn: boolean;
+    smsOptIn: boolean;
+    emailOptIn: boolean;
+  } | null,
+): "no_email" | "opted_out" | "no_consent" | null {
+  if (!customer?.email) return "no_email";
+  if (customer.optOut) return "opted_out";
+  if (!channelConsentOk(customer, "EMAIL")) return "no_consent";
+  return null;
+}
 
 export async function runRestaurantBillPaid(ctx: JobContext): Promise<JobOutcome> {
   const billId = String(ctx.payload.billId ?? "");
@@ -96,7 +125,8 @@ export async function runRestaurantBillPaid(ctx: JobContext): Promise<JobOutcome
   // ---- 3. Consent-safe thank-you + review request (email).
   if (customerId) {
     const customer = await db.customer.findUnique({ where: { id: customerId } });
-    if (customer?.email && customer.marketingConsent) {
+    const skipReason = billThankYouSkipReason(customer);
+    if (customer?.email && !skipReason) {
       const settings = await db.hotelSettings.findUnique({ where: { hotelId }, select: { reviewUrl: true } });
       const reviewUrl = settings?.reviewUrl ?? null;
 
@@ -141,7 +171,7 @@ export async function runRestaurantBillPaid(ctx: JobContext): Promise<JobOutcome
         outcomes.thankYou = { skipped: "already_sent" };
       }
     } else {
-      outcomes.thankYou = { skipped: customer?.email ? "no_consent" : "no_email" };
+      outcomes.thankYou = { skipped: skipReason };
     }
   }
 
@@ -222,22 +252,9 @@ export async function computeDayReport(hotelId: string, dateLocal: string, tz: s
   };
 }
 
-/** Local-day bounds using Intl (DST-safe, no external deps). */
+/** Local-day bounds — delegates to the shared DST-safe helper (see zonedDayBounds). */
 export function localDayBounds(dateStr: string, tz: string): { start: Date; end: Date } {
-  const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
-  const offsetAt = (at: Date): number => {
-    const parts = fmt.formatToParts(at);
-    const y = Number(parts.find((p) => p.type === "year")?.value);
-    const m = Number(parts.find((p) => p.type === "month")?.value);
-    const d = Number(parts.find((p) => p.type === "day")?.value);
-    return Date.UTC(y, m - 1, d) - Math.floor(at.getTime() / 1000) * 1000;
-  };
-  const [y, m, d] = dateStr.split("-").map(Number);
-  const probe = Date.UTC(y, m - 1, d, 12, 0, 0);
-  const offset = offsetAt(new Date(probe));
-  const startMs = Date.UTC(y, m - 1, d) - offset;
-  const endOffset = offsetAt(new Date(startMs + 24 * 3600_000 - 60_000));
-  return { start: new Date(startMs), end: new Date(startMs + 24 * 3600_000 - endOffset) };
+  return zonedDayBounds(dateStr, tz);
 }
 
 export async function runOwnerReport(ctx: JobContext): Promise<JobOutcome> {
