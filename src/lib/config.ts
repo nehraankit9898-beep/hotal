@@ -19,7 +19,13 @@ export function isProduction(): boolean {
   return process.env.NODE_ENV === "production";
 }
 
+/**
+ * AUDIT FIX (SEC-004): test-only behavior must never activate in production, even
+ * if STAYLOOP_TEST leaks into a production environment (startup validation also
+ * rejects it; this is the in-code backstop for the mock-email outbox and test hooks).
+ */
 export function isTest(): boolean {
+  if (isProduction()) return false;
   return process.env.NODE_ENV === "test" || process.env.STAYLOOP_TEST === "1";
 }
 

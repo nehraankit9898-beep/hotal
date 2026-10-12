@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { readJsonCapped } from "@/lib/body";
 import { db } from "@/lib/db";
 import { getSession, getSessionAuth, SessionPayload } from "@/lib/auth";
 import { assertCsrf, isStateChanging } from "@/lib/csrf";
@@ -102,9 +103,6 @@ function allowedDuringMaintenance(pathname: string): boolean {
     pathname.startsWith("/api/webhooks")
   );
 }
-
-/** Max accepted JSON body size for API routes. */
-const MAX_JSON_BODY_BYTES = 1024 * 1024; // 1 MB
 
 /** Require a valid session. Returns user (with DB checks) or a 401/403 response. */
 export async function requireAuth(
@@ -279,10 +277,21 @@ export async function requireSuperAdminSession(
   const path = safePathname(req);
   const dbUser = await db.user.findUnique({
     where: { id: session.userId },
-    select: { status: true, tokenVersion: true, mustChangePassword: true, mfaEnabled: true },
+    select: {
+      status: true,
+      role: true,
+      tokenVersion: true,
+      mustChangePassword: true,
+      mfaEnabled: true,
+    },
   });
   if (!dbUser || dbUser.status !== "ACTIVE") {
     return { response: jsonError("Super admin access required.", 403, "UNAUTHORIZED") };
+  }
+  // AUDIT FIX (SEC-002): the signed token's role claim is not authoritative —
+  // the database role must still be SUPER_ADMIN (demotion must take effect now).
+  if (dbUser.role !== "SUPER_ADMIN") {
+    return { response: jsonError("Super admin access required.", 403, "FORBIDDEN") };
   }
   if ((session.vtv ?? 0) !== dbUser.tokenVersion) {
     return {
@@ -335,20 +344,8 @@ export async function getTenantCustomer(customerId: string, hotelId: string) {
   });
 }
 
-/** Parse + validate JSON body safely (size-capped, object-shaped). */
-export async function readJson(req: Request): Promise<Record<string, unknown> | null> {
-  try {
-    const contentLength = Number(req.headers.get("content-length") ?? "0");
-    if (Number.isFinite(contentLength) && contentLength > MAX_JSON_BODY_BYTES) {
-      return null;
-    }
-    const body = await req.json();
-    if (typeof body !== "object" || body === null) return null;
-    return body as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
+/** Parse + validate JSON body safely (size-capped, object-shaped). See lib/body.ts. */
+export const readJson = readJsonCapped;
 
 /** Human-friendly error message for API consumers (never raw stack traces). */
 export function serverError(err: unknown, fallback = "Something went wrong. Please try again.") {
