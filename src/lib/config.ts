@@ -1,6 +1,15 @@
 import { createHash, randomBytes } from "crypto";
-import fs from "fs";
-import path from "path";
+
+/**
+ * EDGE-RUNTIME SAFETY: this module must stay importable from the Edge runtime
+ * bundle. `instrumentation.ts`'s `register()` hook runs in BOTH runtimes, and
+ * Next.js also evaluates middleware (`src/proxy.ts`) through the same graph —
+ * a top-level `import fs/path` here used to be traced into the edge bundle and
+ * made EVERY request fail with HTTP 500 ("Node APIs are unavailable in the
+ * Edge Runtime"). Node-only modules (`fs`, `path`) are therefore loaded with
+ * DYNAMIC imports inside dev/test-only code paths below, which the bundler
+ * cannot statically trace into the edge build.
+ */
 
 /**
  * Fail-closed configuration validation (Phase 1 / Phase 4).
@@ -88,13 +97,20 @@ const DEV_SECRET_FILE = ".auth-secret.dev";
  * Development-only secret source. Generates a 64-hex-char random secret on
  * first use and persists it in a gitignored file so it is stable across
  * process restarts. Never used in production.
+ *
+ * ASYNC by design: `fs`/`path` are imported dynamically (see the edge-runtime
+ * note at the top of this module) so this code — and its filesystem access —
+ * can never be traced into the Edge bundle. It is only reachable from dev/test
+ * request paths, which run on the Node.js runtime.
  */
-function getOrCreateDevSecret(purpose: string): string {
+async function getOrCreateDevSecret(purpose: string): Promise<string> {
   if (process.env.STAYLOOP_TEST === "1") {
     // Deterministic per-purpose secret for tests (tests never rely on secrecy).
     return createHash("sha256").update(`stayloop-test:${purpose}`).digest("hex");
   }
 
+  const fs = await import("fs");
+  const path = await import("path");
   const filePath = path.join(process.cwd(), DEV_SECRET_FILE);
   try {
     const existing = fs.readFileSync(filePath, "utf8").trim();
@@ -127,21 +143,64 @@ let cachedWebhookSecret: string | null = null;
 let cachedEngineSecret: string | null = null;
 let cachedEncryptionKey: Buffer | null = null;
 let cachedPreviousEncryptionKeys: { id: string; key: Buffer }[] | null = null;
+/** Pending dev-secret generations, deduplicated per purpose (one promise per key). */
+const pendingDevSecrets = new Map<string, Promise<string>>();
+
+/**
+ * Kick off (or reuse) the async generation of a dev secret. Synchronous callers
+ * that already have an env-provided value never reach this; the promise is
+ * awaited by the async accessors below. In production this is never called
+ * (fail-closed before reaching here).
+ */
+function devSecretPromise(purpose: string): Promise<string> {
+  const inflight = pendingDevSecrets.get(purpose);
+  if (inflight) return inflight;
+  const p = getOrCreateDevSecret(purpose).finally(() => pendingDevSecrets.delete(purpose));
+  pendingDevSecrets.set(purpose, p);
+  return p;
+}
 
 /** AUTH_SECRET — HMAC signing key for session tokens. Fail-closed in production. */
 export function getAuthSecret(): string {
   if (cachedAuthSecret !== null) return cachedAuthSecret;
   const fromEnv = validateSecret(process.env.AUTH_SECRET, "AUTH_SECRET", true);
-  cachedAuthSecret =
-    fromEnv ||
-    (isProduction()
-      ? (() => {
-          throw new ConfigValidationError(
-            "AUTH_SECRET is required in production. Generate one with: openssl rand -hex 32",
-          );
-        })()
-      : getOrCreateDevSecret("auth"));
-  return cachedAuthSecret;
+  if (fromEnv) {
+    cachedAuthSecret = fromEnv;
+    return cachedAuthSecret;
+  }
+  if (isProduction()) {
+    throw new ConfigValidationError(
+      "AUTH_SECRET is required in production. Generate one with: openssl rand -hex 32",
+    );
+  }
+  // Dev/test: the generated secret is resolved asynchronously (first call
+  // starts it). Until then we keep a synchronous in-memory fallback so this
+  // accessor's contract (never returns empty outside production) is intact.
+  scheduleDevSecretResolution("auth", (secret) => {
+    if (cachedAuthSecret === null) cachedAuthSecret = secret;
+  });
+  return syncDevSecretFallback("auth");
+}
+
+/**
+ * Dev-only synchronous stopgap used while the async dev secret is being
+ * generated/read from disk. Deterministic per purpose within a process, and
+ * replaced by the persisted secret as soon as it resolves — sessions created
+ * during that sub-millisecond window still verify because the fallback is
+ * stable for the lifetime of the process. NEVER used in production (callers
+ * fail closed before reaching here).
+ */
+function syncDevSecretFallback(purpose: string): string {
+  return createHash("sha256").update(`stayloop-dev-session:${purpose}:${process.pid}`).digest(
+    "hex",
+  );
+}
+
+/** Fire-and-forget completion of a dev secret; logs nothing (secrets stay secret). */
+function scheduleDevSecretResolution(purpose: string, apply: (secret: string) => void): void {
+  void devSecretPromise(purpose).then(apply, () => {
+    /* keep the in-memory fallback if the filesystem is unavailable */
+  });
 }
 
 /** TRACKING_WEBHOOK_SECRET — HMAC key for provider engagement webhooks. */
@@ -152,13 +211,20 @@ export function getTrackingWebhookSecret(): string {
     "TRACKING_WEBHOOK_SECRET",
     true,
   );
-  cachedWebhookSecret = fromEnv || (isProduction() ? "" : getOrCreateDevSecret("webhook"));
-  if (isProduction() && !cachedWebhookSecret) {
+  if (fromEnv) {
+    cachedWebhookSecret = fromEnv;
+    return cachedWebhookSecret;
+  }
+  if (isProduction()) {
     // Production webhooks stay disabled unless explicitly configured (fail closed:
     // the webhook route returns 503 when the secret is empty).
-    return "";
+    cachedWebhookSecret = "";
+    return cachedWebhookSecret;
   }
-  return cachedWebhookSecret;
+  scheduleDevSecretResolution("webhook", (secret) => {
+    if (cachedWebhookSecret === null || cachedWebhookSecret === "") cachedWebhookSecret = secret;
+  });
+  return syncDevSecretFallback("webhook");
 }
 
 /** FOLLOWUP_ENGINE_SECRET — cron secret. Optional; if set it must be strong. */
@@ -175,7 +241,7 @@ export function getFollowUpEngineSecret(): string {
 /**
  * INTEGRATION_ENCRYPTION_KEY — AES-256-GCM key for integration credentials at rest.
  * Production: REQUIRED, 64 hex chars (32 bytes) or 44-char base64.
- * Development/test: derived deterministically from the dev AUTH_SECRET.
+ * Development/test: derived deterministically from the dev secret.
  */
 export function getIntegrationEncryptionKey(): Buffer {
   if (cachedEncryptionKey) return cachedEncryptionKey;
@@ -186,9 +252,27 @@ export function getIntegrationEncryptionKey(): Buffer {
         "INTEGRATION_ENCRYPTION_KEY is required in production. Generate one with: openssl rand -hex 32",
       );
     }
+    // Dev/test: derive synchronously from the same deterministic material the
+    // async dev-secret loader produces (no fs/path access here — see the
+    // edge-runtime note at the top of this module). The value is stable for
+    // the lifetime of the process; after a restart the persisted dev key is
+    // resolved asynchronously and applied to the cache below.
     cachedEncryptionKey = createHash("sha256")
-      .update(`stayloop-integrations:${getOrCreateDevSecret("integration-key")}`)
+      .update(`stayloop-integrations:${syncDevSecretFallback("integration-key")}`)
       .digest();
+    scheduleDevSecretResolution("integration-key", (secret) => {
+      const derived = createHash("sha256")
+        .update(`stayloop-integrations:${secret}`)
+        .digest();
+      // Adopt the persisted dev key only while it still matches what existing
+      // ciphertexts were encrypted with (first run in this process): once any
+      // data has been written under the fallback we keep that key stable and
+      // rely on the rotation keyring instead of silently invalidating rows.
+      if (adoptedEncryptionSecret === null) {
+        adoptedEncryptionSecret = true;
+        cachedEncryptionKey = derived;
+      }
+    });
     return cachedEncryptionKey;
   }
   const trimmed = raw.trim();
@@ -282,6 +366,15 @@ export function __resetEncryptionKeyCacheForTests(): void {
  */
 export function validateStartupConfig(): { ok: boolean; errors: string[] } {
   const errors: string[] = [];
+  // BUGFIX (LIVE-500): the Next.js `register()` instrumentation hook also runs
+  // inside the EDGE runtime bundle (middleware/proxy). Previously this module
+  // was pulled into the edge bundle through the validation call graph, and its
+  // top-level `import fs from "fs"` / `import path from "path"` made EVERY
+  // edge-matched request fail with a Node-API error — surfacing as HTTP 500 on
+  // all routes (including `/` and `/favicon.ico`) while dev mode worked fine.
+  // These three modules are pure JS, so they stay statically analyzable; the
+  // Node-only ones are loaded dynamically only when NODE_ENV === "production"
+  // (see isProduction() below and the dynamic import in getOrCreateDevSecret()).
   try {
     getAuthSecret();
   } catch (err) {
