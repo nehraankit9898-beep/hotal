@@ -142,6 +142,8 @@ let cachedAuthSecret: string | null = null;
 let cachedWebhookSecret: string | null = null;
 let cachedEngineSecret: string | null = null;
 let cachedEncryptionKey: Buffer | null = null;
+/** Set once the persisted dev encryption key has been adopted in this process. */
+let adoptedEncryptionSecret: true | null = null;
 let cachedPreviousEncryptionKeys: { id: string; key: Buffer }[] | null = null;
 /** Pending dev-secret generations, deduplicated per purpose (one promise per key). */
 const pendingDevSecrets = new Map<string, Promise<string>>();
@@ -357,6 +359,7 @@ export function __resetEncryptionKeyCacheForTests(): void {
   }
   cachedEncryptionKey = null;
   cachedPreviousEncryptionKeys = null;
+  adoptedEncryptionSecret = null;
 }
 
 /**
