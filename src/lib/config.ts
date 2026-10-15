@@ -145,6 +145,14 @@ let cachedEncryptionKey: Buffer | null = null;
 /** Set once the persisted dev encryption key has been adopted in this process. */
 let adoptedEncryptionSecret: true | null = null;
 let cachedPreviousEncryptionKeys: { id: string; key: Buffer }[] | null = null;
+/**
+ * Tracks whether the async dev-secret resolution has already been adopted into
+ * `cachedEncryptionKey`. Starts as null ("no adoption decision yet"); flips to
+ * true on the first adoption so later resolutions never swap the key out from
+ * under ciphertexts already written with the synchronous fallback. Reset by
+ * the test-only cache-reset hook below so rotation tests can re-observe it.
+ */
+let adoptedEncryptionSecret: boolean | null = null;
 /** Pending dev-secret generations, deduplicated per purpose (one promise per key). */
 const pendingDevSecrets = new Map<string, Promise<string>>();
 
