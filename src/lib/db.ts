@@ -37,12 +37,16 @@ export function resolveSqlitePath(raw: string): string {
       path.resolve(process.cwd(), "prisma", filePath), // documented: relative to prisma/
       path.resolve(process.cwd(), filePath), // CWD-relative fallback
     ];
-    filePath = candidates.find((c) => fs.existsSync(c)) ?? candidates[0];
+    // The existence probes are marked with `/* turbopackIgnore: true */` so
+    // production builds do not trace the whole project through these dynamic
+    // filesystem accesses (Turbopack warning in src/lib/db.ts). Behaviour is
+    // unchanged: results are still computed at runtime.
+    filePath = candidates.find((c) => fs.existsSync(/* turbopackIgnore: true */ c)) ?? candidates[0];
   }
 
-  if (filePath && !fs.existsSync(filePath)) {
+  if (filePath && !fs.existsSync(/* turbopackIgnore: true */ filePath)) {
     const demoDb = path.resolve(process.cwd(), "db", "custom.db");
-    if (process.env.NODE_ENV !== "production" && fs.existsSync(demoDb)) {
+    if (process.env.NODE_ENV !== "production" && fs.existsSync(/* turbopackIgnore: true */ demoDb)) {
       warnMissingDbOnce(filePath, demoDb);
       return `file:${demoDb}${query}`;
     }
