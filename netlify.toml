@@ -1,0 +1,43 @@
+# StayLoop — Netlify configuration
+#
+# Architecture note: StayLoop is a Next.js 16 (App Router) full-stack app that
+# requires the Node.js runtime (Prisma + SQLite guard + edge middleware in
+# src/proxy.ts). It CANNOT run on Netlify's Edge Functions/ISR-only static
+# hosting. The supported path is Netlify's "Hybrid Node servers" feature:
+# Netlify Runners, configured with @netlify/runners (Next Runtime adapter).
+# See https://docs.netlify.com/build/hybrid-node-servers/ for the Runner
+# setup; this file keeps the CDN-level settings (build, headers, SPA/API
+# pass-through handled by the runner itself).
+#
+# IMPORTANT: do NOT add catch-all rewrites to /index.html here — API routes
+# are server-rendered by the Next.js runtime and must reach it untouched.
+
+[build]
+  # Standard npm build. The build script runs `prisma generate` against the
+  # production PostgreSQL schema before `next build`, so the Prisma client
+  # matches Neon at compile time.
+  command = "npm run build"
+  publish = ".next"
+  node_version = "20"
+
+[build.environment]
+  NEXT_TELEMETRY_DISABLED = "1"
+  # Turbopack is used by default in Next 16 builds; keep Webpack opt-out off.
+  NPM_FLAGS = "--no-audit --no-fund"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+
+# Security headers are emitted per-request by src/proxy.ts (nonce-based CSP)
+# and next.config.ts. These CDN-level extras mirror them for static assets.
+[[headers]]
+  for = "/_next/static/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+    X-Content-Type-Options = "nosniff"
+
+[[headers]]
+  for = "/favicon.ico"
+  [headers.values]
+    Cache-Control = "public, max-age=86400"
+    X-Content-Type-Options = "nosniff"
