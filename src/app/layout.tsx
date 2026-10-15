@@ -25,7 +25,13 @@ export const metadata: Metadata = {
     "Turn one-time guests into repeat customers. Track visits, record marketing consent, and understand your loyal guests — built for hotels.",
   keywords: ["hotel", "customer retention", "loyalty", "visits", "hospitality"],
   icons: {
-    icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
+    // DEPLOY FIX (Netlify 404 on /favicon.ico): the icon must be served from
+    // our own origin. The previous value pointed at a third-party CDN logo
+    // (z-cdn.chatglm.cn) and public/ had no favicon file at all, so browsers
+    // requesting /favicon.ico got a 404. public/favicon.ico now ships with
+    // the app; metadata.icons also emits a <link rel="icon"> in every page.
+    icon: "/favicon.ico",
+    shortcut: "/favicon.ico",
   },
 };
 

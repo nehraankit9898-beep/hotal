@@ -142,8 +142,6 @@ let cachedAuthSecret: string | null = null;
 let cachedWebhookSecret: string | null = null;
 let cachedEngineSecret: string | null = null;
 let cachedEncryptionKey: Buffer | null = null;
-/** Set once the persisted dev encryption key has been adopted in this process. */
-let adoptedEncryptionSecret: true | null = null;
 let cachedPreviousEncryptionKeys: { id: string; key: Buffer }[] | null = null;
 /**
  * Tracks whether the async dev-secret resolution has already been adopted into
