@@ -20,7 +20,7 @@
  *    gateway-verified. Gateway captures require server-side verification.
  */
 
-import { createHmac, timingSafeEqual, randomBytes } from "crypto";
+import { createHash, createHmac, timingSafeEqual, randomBytes } from "crypto";
 import { db } from "@/lib/db";
 import { logAudit, AUDIT_ACTIONS } from "@/lib/audit";
 import { normalizeCouponCode, validateCoupon, computeDiscount } from "@/lib/coupons";
@@ -850,19 +850,41 @@ export async function recordManualPayment(input: RecordPaymentInput): Promise<Pa
   // Fast pre-checks (non-authoritative — the transaction re-validates).
   const bill = await db.bill.findFirst({ where: { id: input.billId, hotelId: input.hotelId } });
   if (!bill) return fail("Bill not found.", "NOT_FOUND");
-  if (bill.status === "VOID") return fail("Bill is void.", "VOID", bill.paidMinor);
-  if (bill.status === "REFUNDED") return fail("Bill is fully refunded.", "REFUNDED", bill.paidMinor);
   if (input.amountMinor <= 0) return fail("Payment amount must be positive.", bill.status, bill.paidMinor);
 
-  if (input.idempotencyKey) {
-    const existing = await db.billPayment.findFirst({
-      where: { billId: bill.id, meta: { contains: `"idempotencyKey":"${input.idempotencyKey}"` } },
-    });
-    if (existing) {
-      const fresh = await db.bill.findUnique({ where: { id: bill.id } });
-      return { ok: true, billId: bill.id, status: existing.status, paidMinor: fresh?.paidMinor ?? bill.paidMinor, billStatus: fresh?.status ?? bill.status, paymentId: existing.id, reason: "ALREADY_RECORDED" };
+  // Hash the caller-provided key with its bill/tenant scope. This keeps raw
+  // idempotency tokens out of the database and avoids substring/escaping bugs.
+  const paymentIdempotencyKey = input.idempotencyKey
+    ? createHash("sha256").update(JSON.stringify([input.hotelId, bill.id, input.idempotencyKey])).digest("hex")
+    : null;
+  const replayResult = async (existing: { id: string; status: string; method: string; amountMinor: number; reference: string | null; cashSessionId: string | null }) => {
+    if (
+      existing.method !== input.method ||
+      existing.amountMinor !== input.amountMinor ||
+      existing.reference !== (input.reference ?? null) ||
+      existing.cashSessionId !== (input.cashSessionId ?? null)
+    ) {
+      return fail("Idempotency key has already been used for a different payment.", bill.status, bill.paidMinor);
     }
+    const fresh = await db.bill.findUnique({ where: { id: bill.id } });
+    return { ok: true, billId: bill.id, status: existing.status, paidMinor: fresh?.paidMinor ?? bill.paidMinor, billStatus: fresh?.status ?? bill.status, paymentId: existing.id, reason: "ALREADY_RECORDED" };
+  };
+
+  if (paymentIdempotencyKey) {
+    const existing = await db.billPayment.findUnique({ where: { idempotencyKey: paymentIdempotencyKey } });
+    if (existing) return replayResult(existing);
+
+    // Read payments written before the durable key column was introduced.
+    // JSON.stringify safely escapes quotes and backslashes in legacy tokens.
+    const legacyMeta = JSON.stringify({ idempotencyKey: input.idempotencyKey });
+    const legacy = await db.billPayment.findFirst({ where: { billId: bill.id, meta: { contains: legacyMeta } } });
+    if (legacy) return replayResult(legacy);
   }
+
+  // Replays are resolved before terminal-state checks: a retry after the bill
+  // was later refunded/voided must still identify the original payment.
+  if (bill.status === "VOID") return fail("Bill is void.", "VOID", bill.paidMinor);
+  if (bill.status === "REFUNDED") return fail("Bill is fully refunded.", "REFUNDED", bill.paidMinor);
 
   // AUDIT FIX (P14-CSH-1): a payment tagged to a missing/closed/foreign cash
   // session silently vanished from every drawer reconciliation. Validate it.
@@ -899,7 +921,7 @@ export async function recordManualPayment(input: RecordPaymentInput): Promise<Pa
             cashSessionId: input.cashSessionId ?? null,
             reference: input.reference ?? null,
             recordedByUserId: input.recordedByUserId,
-            meta: input.idempotencyKey ? JSON.stringify({ idempotencyKey: input.idempotencyKey }) : null,
+            idempotencyKey: paymentIdempotencyKey,
           },
         });
         const paidMinor = fresh.paidMinor + input.amountMinor;
@@ -954,6 +976,18 @@ export async function recordManualPayment(input: RecordPaymentInput): Promise<Pa
       paymentId: result.payment.id,
     };
   } catch (err) {
+    if (
+      paymentIdempotencyKey &&
+      typeof err === "object" &&
+      err !== null &&
+      (err as { code?: string }).code === "P2002"
+    ) {
+      // Concurrent retries can both pass the pre-check. The unique index is
+      // the authoritative fence; return the committed winner instead of
+      // applying a second allocation or surfacing a spurious 500.
+      const winner = await db.billPayment.findUnique({ where: { idempotencyKey: paymentIdempotencyKey } });
+      if (winner) return replayResult(winner);
+    }
     if (err instanceof BillValidationError) {
       const fresh = await db.bill.findUnique({ where: { id: input.billId } });
       return fail(err.message, fresh?.status ?? "FAILED", fresh?.paidMinor ?? 0);
@@ -1090,8 +1124,9 @@ export async function refundOrVoidBill(input: RefundInput): Promise<{ ok: boolea
   if (amount <= 0) return { ok: false, reason: "Nothing left to refund on this bill." };
   if (amount > refundable) return { ok: false, reason: `Refund exceeds the refundable amount (${(refundable / 100).toFixed(2)}).` };
 
+  let finalStatus: "PARTIALLY_REFUNDED" | "REFUNDED";
   try {
-    await db.$transaction(
+    finalStatus = await db.$transaction(
       async (tx) => {
         const fresh = await tx.bill.findFirst({ where: { id: bill.id, hotelId: input.hotelId } });
         if (!fresh || fresh.status === "VOID") throw new BillValidationError("Bill is void.", "BILL_STATE");
@@ -1127,6 +1162,7 @@ export async function refundOrVoidBill(input: RefundInput): Promise<{ ok: boolea
           metadata: { billNumber: bill.billNumber, amountMinor: amount, reason: input.reason },
           tx,
         });
+        return status;
       },
       { timeout: 30_000 },
     );
@@ -1134,7 +1170,7 @@ export async function refundOrVoidBill(input: RefundInput): Promise<{ ok: boolea
     if (err instanceof BillValidationError) return { ok: false, reason: err.message };
     throw err;
   }
-  return { ok: true, refundMinor: amount, status: "REFUNDED" };
+  return { ok: true, refundMinor: amount, status: finalStatus };
 }
 
 /* ------------------------------------------------------------------ */

@@ -323,6 +323,16 @@ describe("Phase 14 — payments (splits, conservation, RBAC)", () => {
     expect(p1.status).toBe(201);
     const p2 = await apiCall("POST", `/api/bills/${bid}/pay`, { jar: adminJar, body: { method: "CASH", amountMinor: 10000, idempotencyKey: key } });
     expect(p2.status).toBe(201);
+    expect(p2.body.payment.paymentId).toBe(p1.body.payment.paymentId);
+
+    // Reusing the same key for a different payment intent must not charge a
+    // second amount or silently pretend that the changed request succeeded.
+    const mismatchedReplay = await apiCall("POST", `/api/bills/${bid}/pay`, {
+      jar: adminJar,
+      body: { method: "CASH", amountMinor: 9000, idempotencyKey: key },
+    });
+    expect(mismatchedReplay.status).toBe(422);
+
     const detail = await apiCall("GET", `/api/bills/${bid}`, { jar: adminJar });
     expect(detail.body.bill.payments.length).toBe(1);
     expect(detail.body.bill.paidMinor).toBe(10000);
@@ -348,6 +358,7 @@ describe("Phase 14 — refunds & voids", () => {
       body: { type: "REFUND", amountMinor: 5000, reason: "wrong item" },
     });
     expect(r1.status).toBe(201);
+    expect(r1.body.refund.status).toBe("PARTIALLY_REFUNDED");
 
     const detail = await apiCall("GET", `/api/bills/${billId}`, { jar: adminJar });
     expect(detail.body.bill.status).toBe("PARTIALLY_REFUNDED");
