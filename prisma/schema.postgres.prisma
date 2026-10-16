@@ -2129,6 +2129,7 @@ model BillPayment {
   gateway           String? // "RAZORPAY"
   gatewayOrderId    String?
   gatewayPaymentId  String?           @unique // idempotency fence for gateway captures
+  idempotencyKey    String?           @unique // stable fence for manual payment retries
   signatureVerified Boolean           @default(false)
   cashSessionId     String? // plain id — cash reconciliation grouping
   reference         String? // UTR / auth code / notes reference
