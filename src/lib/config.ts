@@ -145,12 +145,14 @@ let cachedEncryptionKey: Buffer | null = null;
 let cachedPreviousEncryptionKeys: { id: string; key: Buffer }[] | null = null;
 /**
  * Tracks whether the async dev-secret resolution has already been adopted into
- * `cachedEncryptionKey`. Starts as null ("no adoption decision yet"); flips to
- * true on the first adoption so later resolutions never swap the key out from
- * under ciphertexts already written with the synchronous fallback. Reset by
- * the test-only cache-reset hook below so rotation tests can re-observe it.
+ * `cachedEncryptionKey`. Starts as false ("no adoption decision yet"); flips
+ * to true on the first adoption so later resolutions never swap the key out
+ * from under ciphertexts already written with the synchronous fallback. Reset
+ * by the test-only cache-reset hook below so rotation tests can re-observe it.
  */
-let adoptedEncryptionSecret: boolean | null = null;
+// This state is module-scoped because the async dev-secret loader can resolve
+// after several synchronous callers have already requested the key.
+let adoptedEncryptionSecret = false;
 /** Pending dev-secret generations, deduplicated per purpose (one promise per key). */
 const pendingDevSecrets = new Map<string, Promise<string>>();
 
@@ -276,7 +278,7 @@ export function getIntegrationEncryptionKey(): Buffer {
       // ciphertexts were encrypted with (first run in this process): once any
       // data has been written under the fallback we keep that key stable and
       // rely on the rotation keyring instead of silently invalidating rows.
-      if (adoptedEncryptionSecret === null) {
+      if (!adoptedEncryptionSecret) {
         adoptedEncryptionSecret = true;
         cachedEncryptionKey = derived;
       }
@@ -365,7 +367,7 @@ export function __resetEncryptionKeyCacheForTests(): void {
   }
   cachedEncryptionKey = null;
   cachedPreviousEncryptionKeys = null;
-  adoptedEncryptionSecret = null;
+  adoptedEncryptionSecret = false;
 }
 
 /**
